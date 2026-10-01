@@ -117,20 +117,27 @@ That is the normal way in. It looks for a running control plane for the profile:
   daemon that is down; the watchdog could not arm; the port is taken; the state file is unreadable, or it did not answer in time) → prints the reason and
   the last lines of its output and exits non-zero. The TUI is not opened over a broken start.
 
-Quitting the TUI (`Q`) leaves the control plane running. To stop it, use the TUI's *Control
-Plane* screen (`4`, then `X`, then Enter) or, from a shell, `aiops stop`.
+Quitting the TUI (`Q`) leaves the control plane running. To stop it, use the TUI's *System* area
+(`4`, then `X`, then Enter) or, from a shell, `aiops stop`.
 
-Deciding an incident: open it (`Enter`) and read its evidence; `A` (approve) or `R` (reject) work
-only on that page, and only once the incident's details have loaded. The confirmation shows the
-incident, the server's reason, and the effect (a restart interrupts inference and has no
-rollback); `Enter` is ignored for the first half second so a held key cannot confirm it. While the
-server executes and verifies, an inline banner shows the server's current state for that incident.
+What you see first is plain language: "Everything is working", "Your model stopped answering",
+"Needs your OK". Press **`D`** for the technical view of the same screen (exact incident categories,
+raw states, evidence sources, probe results, GPU and vLLM metrics, audit hashes); `D` again goes
+back. `aiops-tui --once --details` prints that technical frame for scripts. The header always says
+which world you are in: `LIVE · GPU-REAL` (a real GPU reading is present), `LIVE`, or `SIMULATION`.
 
-Inside the TUI: `Ctrl+P` opens the command palette; `?` opens Help. Screens: Overview,
-Incidents, Audit, Control Plane, Settings, Diagnostics, About, Help (`←`/`→`, `Tab`, `1`–`7` or `?`).
-Settings and Diagnostics are read-only views of what the server reports (the validated active
-configuration; the same checks as `aiops doctor`). Restarting the control plane is not done from
-the TUI; run `aiops` again after a stop.
+Deciding an incident: open it (`Enter`). The page reads *What happened*, *What we found*,
+*Recommended action* and *Recovery check*; `A` (approve) or `R` (reject) work only on that page, and
+only once the incident's details have loaded (until then it says "Loading the full details…"). The
+confirmation shows the incident, the server's reason, and the effect (a restart interrupts inference
+and has no rollback); `Enter` is ignored for the first half second so a held key cannot confirm it.
+While the server executes and verifies, an inline banner shows the server's current state.
+
+Inside the TUI: `Ctrl+P` opens the command palette; `?` opens Help. Four areas (`←`/`→`, `Tab`,
+or `1`–`4`): **Overview**, **Incidents**, **Activity** (what the system did and decided) and
+**System** (the control plane and its stop, the same checks as `aiops doctor`, the validated active
+configuration, and About; all read-only except the confirmed stop). Restarting the control plane is
+not done from the TUI; run `aiops` again after a stop.
 
 The explicit commands remain for scripts and debugging:
 

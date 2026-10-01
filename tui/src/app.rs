@@ -53,25 +53,16 @@ pub enum Screen {
     Dashboard,
     Incidents,
     Detail(String),
+    /// Activity: what the system did and decided.
     Audit,
-    ControlPlane,
-    Settings,
-    Diagnostics,
-    About,
+    /// The control plane, its diagnostics, its read-only configuration and About, in one place.
+    System,
     Help,
 }
 
-/// The order `Tab` walks and the sidebar lists; `1`..`7` jump to the first seven.
-pub const SCREEN_ORDER: [Screen; 8] = [
-    Screen::Dashboard,
-    Screen::Incidents,
-    Screen::Audit,
-    Screen::ControlPlane,
-    Screen::Settings,
-    Screen::Diagnostics,
-    Screen::About,
-    Screen::Help,
-];
+/// The four areas: the order `Tab` walks and the sidebar lists; `1`..`4` jump to them.
+/// Help is not an area: it is on `?`.
+pub const SCREEN_ORDER: [Screen; 4] = [Screen::Dashboard, Screen::Incidents, Screen::Audit, Screen::System];
 
 /// Something the server was asked for and has (or has not yet) answered. Never a default.
 #[derive(Debug, Clone)]
@@ -94,10 +85,7 @@ pub enum Command {
     Overview,
     Incidents,
     Audit,
-    ControlPlane,
-    Settings,
-    Diagnostics,
-    About,
+    System,
     Help,
     Refresh,
     StopControlPlane,
@@ -123,14 +111,11 @@ pub struct Offer {
 pub const FAULT_SECONDS: u32 = 120;
 
 impl Command {
-    pub const ALL: [Command; 16] = [
+    pub const ALL: [Command; 13] = [
         Command::Overview,
         Command::Incidents,
         Command::Audit,
-        Command::ControlPlane,
-        Command::Settings,
-        Command::Diagnostics,
-        Command::About,
+        Command::System,
         Command::Help,
         Command::Refresh,
         Command::StopControlPlane,
@@ -144,13 +129,10 @@ impl Command {
 
     pub fn label(self) -> &'static str {
         match self {
-            Command::Overview => "Open Overview",
-            Command::Incidents => "Open Incidents",
-            Command::Audit => "Open Audit",
-            Command::ControlPlane => "Open Control Plane",
-            Command::Settings => "Open Settings",
-            Command::Diagnostics => "Open Diagnostics",
-            Command::About => "Open About",
+            Command::Overview => "Go to Overview",
+            Command::Incidents => "Go to Incidents",
+            Command::Audit => "Go to Activity",
+            Command::System => "Go to System",
             Command::Help => "Open Help",
             Command::Refresh => "Refresh",
             Command::StopControlPlane => "Stop control plane…",
@@ -205,12 +187,12 @@ pub const KEYMAP: [(&str, &str); 17] = [
     ("Esc", "Back / cancel / close (on the Overview while practicing: leave practice)"),
     ("Tab →", "Next screen"),
     ("←", "Previous screen"),
-    ("1-7", "Jump to a screen (Overview … About)"),
+    ("1-4", "Jump to Overview, Incidents, Activity or System"),
     ("?", "Help"),
     ("Ctrl+P", "Command palette"),
     ("P", "Practice an incident (simulated; nothing real is touched)"),
     ("F", "Break the model while practicing (simulated)"),
-    ("D", "Show or hide technical details (Diagnostics: run again)"),
+    ("D", "Technical details on or off (System: run the checks again)"),
     ("S", "Refresh now"),
     ("A", "Approve (on an incident's page, once it awaits a decision)"),
     ("R", "Reject (on an incident's page, once it awaits a decision)"),
@@ -528,7 +510,7 @@ impl App {
             KeyCode::Char('s') | KeyCode::Char('S') => return vec![Effect::RefreshNow],
             KeyCode::Tab | KeyCode::Right => fx = self.cycle(1),
             KeyCode::Left => fx = self.cycle(-1),
-            KeyCode::Char(c @ '1'..='7') => {
+            KeyCode::Char(c @ '1'..='4') => {
                 fx = self.go(SCREEN_ORDER[c as usize - '1' as usize].clone());
             }
             KeyCode::Char('?') => fx = self.go(Screen::Help),
@@ -558,11 +540,11 @@ impl App {
             KeyCode::Char('f') | KeyCode::Char('F') if self.practice => fx = self.inject_fault(),
             KeyCode::Char('a') | KeyCode::Char('A') => self.begin(ActionKind::Approve),
             KeyCode::Char('r') | KeyCode::Char('R') => self.begin(ActionKind::Reject),
-            KeyCode::Char('d') | KeyCode::Char('D') if self.screen == Screen::Diagnostics => {
+            KeyCode::Char('d') | KeyCode::Char('D') if self.screen == Screen::System => {
                 fx = self.load_diagnostics(true)
             }
             KeyCode::Char('d') | KeyCode::Char('D') => self.details = !self.details,
-            KeyCode::Char('x') | KeyCode::Char('X') if self.screen == Screen::ControlPlane => {
+            KeyCode::Char('x') | KeyCode::Char('X') if self.screen == Screen::System => {
                 self.begin_stop()
             }
             _ => {}
@@ -617,10 +599,7 @@ impl App {
             Command::Overview => self.go(Screen::Dashboard),
             Command::Incidents => self.go(Screen::Incidents),
             Command::Audit => self.go(Screen::Audit),
-            Command::ControlPlane => self.go(Screen::ControlPlane),
-            Command::Settings => self.go(Screen::Settings),
-            Command::Diagnostics => self.go(Screen::Diagnostics),
-            Command::About => self.go(Screen::About),
+            Command::System => self.go(Screen::System),
             Command::Help => self.go(Screen::Help),
             Command::Refresh => vec![Effect::RefreshNow],
             Command::StopControlPlane => {
@@ -735,9 +714,12 @@ impl App {
         self.screen = screen;
         self.scroll = 0;
         match self.screen {
-            Screen::Settings => self.load_config(),
-            Screen::About => self.load_version(),
-            Screen::Diagnostics => self.load_diagnostics(false),
+            Screen::System => {
+                let mut fx = self.load_config();
+                fx.extend(self.load_version());
+                fx.extend(self.load_diagnostics(false));
+                fx
+            }
             _ => Vec::new(),
         }
     }

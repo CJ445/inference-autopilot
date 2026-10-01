@@ -28,7 +28,7 @@ fn app() -> App {
     a
 }
 fn screen(a: &App) -> String {
-    ui::render_to_string(a, 120, 44)
+    ui::render_to_string(a, 120, 200)   // System is one tall scroll of four sections
 }
 fn has(s: &str, needle: &str) {
     assert!(s.contains(needle), "missing {needle:?} in:\n{s}");
@@ -60,24 +60,39 @@ fn diagnostics() -> Diagnostics {
 // --- navigation and what each screen asks for ----------------------------------------------------
 
 #[test]
-fn opening_settings_about_and_diagnostics_asks_the_server_once_each() {
+fn opening_system_asks_the_server_once_for_each_of_its_sections() {
     let mut a = app();
-    assert_eq!(a.handle_key(key('5')), vec![Effect::LoadConfig]);
-    assert!(a.handle_key(key('5')).is_empty(), "already loading: no duplicate request");
-    assert_eq!(a.handle_key(key('7')), vec![Effect::LoadVersion]);
-    assert_eq!(a.handle_key(key('6')), vec![Effect::RunDiagnostics]);
-    assert!(a.handle_key(key('6')).is_empty());
-    assert!(a.handle_key(key('4')).is_empty() && matches!(a.screen, Screen::ControlPlane));
+    assert_eq!(a.handle_key(key('4')), vec![Effect::LoadConfig, Effect::LoadVersion, Effect::RunDiagnostics]);
+    assert!(matches!(a.screen, Screen::System));
+    assert!(a.handle_key(key('4')).is_empty(), "already loading: no duplicate request");
+    a.handle_key(key('1'));
+    assert!(a.handle_key(key('4')).is_empty(), "still loading: not asked again");
     assert!(a.handle_key(key('?')).is_empty() && matches!(a.screen, Screen::Help));
+    // the old keys 5..7 are gone: there are four areas, and Help is on `?`
+    let before = a.screen.clone();
+    assert!(a.handle_key(key('5')).is_empty() && a.screen == before);
+    assert!(a.handle_key(key('7')).is_empty() && a.screen == before);
+}
+
+#[test]
+fn d_on_system_runs_the_checks_again_and_x_asks_to_stop() {
+    let mut a = app();
+    a.handle_key(key('4'));
+    a.apply(Msg::Loaded(Loaded::Diagnostics(Ok(diagnostics()))));
+    let view = a.details;
+    assert_eq!(a.handle_key(key('d')), vec![Effect::RunDiagnostics]);
+    assert_eq!(a.details, view, "on System D never means technical details");
+    a.handle_key(key('x'));
+    assert!(a.stop_confirm);
 }
 
 #[test]
 fn a_failed_read_is_retried_on_the_next_visit_not_cached_as_a_value() {
     let mut a = app();
-    a.handle_key(key('5'));
+    a.handle_key(key('4'));
     a.apply(Msg::Loaded(Loaded::Config(Err(ApiError::Timeout))));
     a.handle_key(code(KeyCode::Esc));
-    assert_eq!(a.handle_key(key('5')), vec![Effect::LoadConfig]);
+    assert_eq!(a.handle_key(key('4')), vec![Effect::LoadConfig]);
 }
 
 // --- settings ------------------------------------------------------------------------------------
@@ -85,7 +100,7 @@ fn a_failed_read_is_retried_on_the_next_visit_not_cached_as_a_value() {
 #[test]
 fn settings_separate_client_preferences_from_read_only_control_plane_configuration() {
     let mut a = app();
-    a.handle_key(key('5'));
+    a.handle_key(key('4'));
     has(&screen(&a), "Loading");
     a.apply(Msg::Loaded(Loaded::Config(Ok(config()))));
     let s = screen(&a);
@@ -99,7 +114,7 @@ fn settings_separate_client_preferences_from_read_only_control_plane_configurati
 #[test]
 fn settings_never_invent_configuration_the_server_did_not_send() {
     let mut a = app();
-    a.handle_key(key('5'));
+    a.handle_key(key('4'));
     a.apply(Msg::Loaded(Loaded::Config(Err(ApiError::Offline("refused".into())))));
     let s = screen(&a);
     has(&s, "N/A: control plane offline");
@@ -113,7 +128,7 @@ fn settings_never_invent_configuration_the_server_did_not_send() {
 #[test]
 fn diagnostics_show_the_doctors_statuses_unreinterpreted() {
     let mut a = app();
-    a.handle_key(key('6'));
+    a.handle_key(key('4'));
     has(&screen(&a), "Loading");
     a.apply(Msg::Loaded(Loaded::Diagnostics(Ok(diagnostics()))));
     let s = screen(&a);
@@ -127,8 +142,8 @@ fn diagnostics_show_the_doctors_statuses_unreinterpreted() {
 #[test]
 fn d_runs_diagnostics_again_but_never_two_at_once_and_only_on_that_screen() {
     let mut a = app();
-    assert!(a.handle_key(key('d')).is_empty(), "D means nothing elsewhere");
-    a.handle_key(key('6'));
+    assert!(a.handle_key(key('d')).is_empty(), "elsewhere D only switches the view: it asks the server for nothing");
+    a.handle_key(key('4'));
     a.apply(Msg::Loaded(Loaded::Diagnostics(Ok(diagnostics()))));
     assert_eq!(a.handle_key(key('d')), vec![Effect::RunDiagnostics]);
     assert!(a.handle_key(key('d')).is_empty(), "one run at a time");
@@ -138,7 +153,8 @@ fn d_runs_diagnostics_again_but_never_two_at_once_and_only_on_that_screen() {
 fn diagnostics_need_the_control_plane_and_say_so_when_it_is_unreachable() {
     let mut a = App::new("http://127.0.0.1:8080".into());
     a.apply(Msg::Poll(Err(ApiError::Offline("refused".into()))));
-    assert!(a.handle_key(key('6')).is_empty());
+    let fx = a.handle_key(key('4'));
+    assert!(!fx.contains(&Effect::RunDiagnostics), "the doctor is never run against an unreachable server");
     assert!(a.active_notice().unwrap().text.contains("unreachable"));
 }
 
@@ -147,7 +163,7 @@ fn diagnostics_need_the_control_plane_and_say_so_when_it_is_unreachable() {
 #[test]
 fn about_shows_the_real_versions_and_omits_what_is_not_reported() {
     let mut a = app();
-    a.handle_key(key('7'));
+    a.handle_key(key('4'));
     a.apply(Msg::Loaded(Loaded::Version(Ok(VersionInfo {
         version: "0.1.0".into(), git_revision: None, python: Some("3.13.5".into()), platform: None,
     }))));
@@ -162,7 +178,7 @@ fn about_shows_the_real_versions_and_omits_what_is_not_reported() {
 #[test]
 fn about_without_an_answer_says_na() {
     let mut a = app();
-    a.handle_key(key('7'));
+    a.handle_key(key('4'));
     a.apply(Msg::Loaded(Loaded::Version(Err(ApiError::Timeout))));
     has(&screen(&a), "N/A: control plane did not answer in time");
 }
@@ -252,8 +268,8 @@ fn ctrl_p_opens_the_palette_and_esc_closes_it() {
     a.handle_key(ctrl('p'));
     assert!(a.palette.is_some());
     let s = screen(&a);
-    for needle in ["Commands", "Search commands", "Open Overview", "Open Settings", "Open Diagnostics",
-                   "Open About", "Open Help", "Refresh", "Stop control plane", "Quit"] {
+    for needle in ["Commands", "Search commands", "Go to Overview", "Go to Incidents", "Go to Activity",
+                   "Go to System", "Open Help", "Refresh", "Stop control plane", "Quit"] {
         has(&s, needle);
     }
     a.handle_key(code(KeyCode::Esc));
@@ -265,19 +281,19 @@ fn ctrl_p_opens_the_palette_and_esc_closes_it() {
 fn the_palette_filters_navigates_and_executes() {
     let mut a = app();
     a.handle_key(ctrl('p'));
-    for c in "diag".chars() {
+    for c in "syst".chars() {
         a.handle_key(key(c));
     }
-    assert_eq!(a.palette.as_ref().unwrap().matches(Default::default()), vec![Command::Diagnostics]);
-    assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Effect::RunDiagnostics]);
-    assert!(a.palette.is_none() && matches!(a.screen, Screen::Diagnostics));
+    assert_eq!(a.palette.as_ref().unwrap().matches(Default::default()), vec![Command::System]);
+    assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Effect::LoadConfig, Effect::LoadVersion, Effect::RunDiagnostics]);
+    assert!(a.palette.is_none() && matches!(a.screen, Screen::System));
 
     a.handle_key(ctrl('p'));
     a.handle_key(code(KeyCode::Down));
     a.handle_key(code(KeyCode::Down));
     a.handle_key(code(KeyCode::Up));
     assert_eq!(a.palette.as_ref().unwrap().selected, 1);
-    a.handle_key(code(KeyCode::Enter));               // the second command: Open Incidents
+    a.handle_key(code(KeyCode::Enter));               // the second command: Go to Incidents
     assert!(matches!(a.screen, Screen::Incidents));
 }
 
@@ -375,7 +391,7 @@ fn help_lists_exactly_the_keys_that_work() {
     b.handle_key(code(KeyCode::Esc));
     b.handle_key(key('?'));
     assert!(matches!(b.screen, Screen::Help));
-    for (n, c) in "1234567".chars().enumerate() {
+    for (n, c) in "1234".chars().enumerate() {
         b.handle_key(key(c));
         assert_eq!(b.screen, aiops_tui::app::SCREEN_ORDER[n], "key {c}");
     }
@@ -384,15 +400,36 @@ fn help_lists_exactly_the_keys_that_work() {
 #[test]
 fn the_sidebar_lists_every_screen_and_marks_the_current_one() {
     let mut a = app();
-    a.handle_key(key('6'));
+    a.handle_key(key('4'));
     let s = screen(&a);
-    for needle in ["OVERVIEW", "INCIDENTS", "AUDIT", "SYSTEM", "Control Plane", "OPERATOR", "Settings",
-                   "Diagnostics", "About", "Help"] {
+    for needle in ["OVERVIEW", "INCIDENTS", "ACTIVITY", "SYSTEM", "Help  ?"] {
         has(&s, needle);
+    }
+    for old in ["AUDIT", "Control Plane", "OPERATOR", "Settings"] {
+        lacks(&s.lines().take(40).map(|l| l.split('│').next().unwrap_or("")).collect::<Vec<_>>().join("\n"), old);
     }
     let marked: Vec<&str> = s.lines().filter(|l| l.contains("▌")).collect();
     assert_eq!(marked.len(), 1);
-    assert!(marked[0].contains("Diagnostics"));
+    assert!(marked[0].contains("SYSTEM"));
+    // Help is not one of the four areas, but is marked when it is the current screen
+    a.handle_key(key('?'));
+    let on_help: Vec<String> = screen(&a).lines().filter(|l| l.contains("▌")).map(String::from).collect();
+    assert_eq!(on_help.len(), 1);
+    assert!(on_help[0].contains("Help"));
+}
+
+#[test]
+fn system_holds_the_control_plane_diagnostics_configuration_and_about_in_that_order() {
+    let mut a = app();
+    a.handle_key(key('4'));
+    a.apply(Msg::Loaded(Loaded::Config(Ok(config()))));
+    a.apply(Msg::Loaded(Loaded::Version(Ok(VersionInfo { version: "0.1.0".into(), git_revision: None, python: None, platform: None }))));
+    a.apply(Msg::Loaded(Loaded::Diagnostics(Ok(diagnostics()))));
+    let s = screen(&a);
+    let at = |n: &str| s.find(n).unwrap_or_else(|| panic!("missing {n:?} in:\n{s}"));
+    let order = [at("Control plane"), at("[ X ] Stop control plane"), at("Diagnostics"), at("Client"),
+                 at("Control plane configuration"), at("About")];
+    assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
 }
 
 #[test]
@@ -402,7 +439,7 @@ fn every_screen_renders_at_the_minimum_and_common_sizes_without_panicking() {
     a.apply(Msg::Loaded(Loaded::Version(Ok(VersionInfo { version: "1".into(), git_revision: Some("abc".into()), python: None, platform: None }))));
     a.apply(Msg::Loaded(Loaded::Diagnostics(Ok(diagnostics()))));
     for (w, h) in [(72, 18), (80, 24), (120, 40), (200, 60)] {
-        for n in "1234567?".chars() {
+        for n in "1234?".chars() {
             a.handle_key(key(n));
             ui::render_to_string(&a, w, h);
         }
@@ -416,7 +453,7 @@ fn every_screen_renders_at_the_minimum_and_common_sizes_without_panicking() {
 fn the_state_chips_use_the_semantic_palette() {
     let a = {
         let mut a = app();
-        a.handle_key(key('6'));
+        a.handle_key(key('4'));
         a.apply(Msg::Loaded(Loaded::Diagnostics(Ok(diagnostics()))));
         a
     };
@@ -566,14 +603,14 @@ fn left_and_right_move_through_the_sidebar_screens_and_wrap() {
 #[test]
 fn left_and_right_load_what_the_new_screen_needs_and_are_ignored_in_overlays() {
     let mut a = app();
-    for _ in 0..4 {
-        a.handle_key(code(KeyCode::Right)); // Incidents, Audit, Control Plane
+    for _ in 0..3 {
+        a.handle_key(code(KeyCode::Right)); // Incidents, Activity, System
     }
-    assert!(matches!(a.screen, Screen::Settings));
+    assert!(matches!(a.screen, Screen::System));
     assert_eq!(a.config.is_loading(), true, "arriving by arrow asks the server like any other way in");
     a.handle_key(ctrl('p'));
     assert!(a.handle_key(code(KeyCode::Left)).is_empty());
-    assert!(matches!(a.screen, Screen::Settings), "the palette keeps the arrows");
+    assert!(matches!(a.screen, Screen::System), "the palette keeps the arrows");
 }
 
 #[test]

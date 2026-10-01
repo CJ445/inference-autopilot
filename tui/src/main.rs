@@ -30,7 +30,7 @@ const DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(120);
 const HELP: &str = "aiops-tui: operator interface for the Inference Autopilot control plane
 
 USAGE: aiops-tui [--url URL] [--interval-ms N] [--timeout-ms N]
-       aiops-tui --once [--screen dashboard|incidents|audit|control|settings|diagnostics|about|help|detail:ID] [--width N] [--height N] [--details]
+       aiops-tui --once [--screen dashboard|incidents|activity|system|help|detail:ID] [--width N] [--height N] [--details]
 
   --url URL         control-plane API (loopback http only)   [default http://127.0.0.1:8080]
   --interval-ms N   refresh interval, 250..10000             [default 750]
@@ -40,7 +40,7 @@ USAGE: aiops-tui [--url URL] [--interval-ms N] [--timeout-ms N]
                     (exit status 3 if the control plane is unreachable)
 
 KEYS  Up/Down navigate   Enter inspect   A approve   R reject   Esc back   S refresh
-      Tab or 1-7 switch screens   Ctrl+P command palette   ? help   Q or Ctrl+C quit
+      Tab or 1-4 switch areas   Ctrl+P command palette   ? help   Q or Ctrl+C quit
 ";
 
 struct Opts {
@@ -177,11 +177,9 @@ fn once(o: &Opts) -> ExitCode {
     match o.screen.as_str() {
         "dashboard" => {}
         "incidents" => app.screen = Screen::Incidents,
-        "audit" => app.screen = Screen::Audit,
-        "control" => app.screen = Screen::ControlPlane,
-        "settings" => app.screen = Screen::Settings,
-        "diagnostics" => app.screen = Screen::Diagnostics,
-        "about" => app.screen = Screen::About,
+        "audit" | "activity" => app.screen = Screen::Audit,
+        // the old per-topic names still work: all of them are sections of System now
+        "system" | "control" | "settings" | "diagnostics" | "about" => app.screen = Screen::System,
         "help" => app.screen = Screen::Help,
         s if s.starts_with("detail:") => app.screen = Screen::Detail(s["detail:".len()..].to_string()),
         other => {
@@ -199,9 +197,9 @@ fn once(o: &Opts) -> ExitCode {
     if online {
         // the same read-only requests the interactive screens make, answered synchronously
         match app.screen {
-            Screen::Settings => app.apply(Msg::Loaded(Loaded::Config(client.config()))),
-            Screen::About => app.apply(Msg::Loaded(Loaded::Version(client.version()))),
-            Screen::Diagnostics => {
+            Screen::System => {
+                app.apply(Msg::Loaded(Loaded::Config(client.config())));
+                app.apply(Msg::Loaded(Loaded::Version(client.version())));
                 let slow = client.clone().with_timeouts(Duration::from_secs(1), DIAGNOSTICS_TIMEOUT);
                 app.apply(Msg::Loaded(Loaded::Diagnostics(slow.diagnostics())));
             }

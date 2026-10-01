@@ -448,7 +448,7 @@ fn d_on_activity_shows_the_raw_events_and_hashes() {
 fn every_plain_screen_renders_at_common_sizes_without_panicking() {
     let mut a = detail_app(PENDING);
     for (w, h) in [(72, 18), (80, 24), (120, 40), (200, 60)] {
-        for k in "1234567?".chars() {
+        for k in "1234?".chars() {
             a.handle_key(key(k));
             ui::render_to_string(&a, w, h);
         }
@@ -460,4 +460,40 @@ fn every_plain_screen_renders_at_common_sizes_without_panicking() {
         a.handle_key(key('d'));
         a.handle_key(code(KeyCode::Esc));
     }
+}
+
+// --- the mode badge ---------------------------------------------------------------------------------
+
+fn header_row(a: &App) -> String {
+    ui::render_to_string(a, 120, 30).lines().nth(1).unwrap().to_string()
+}
+fn badge_cell(a: &App, text: &str) -> ratatui::style::Modifier {
+    let buf = ui::render_to_buffer(a, 120, 30);
+    let w = buf.area.width as usize;
+    let line: String = (0..w).map(|x| buf.content()[w + x].symbol().to_string()).collect();
+    let at = line.chars().position(|_| true).map(|_| line.find(text).unwrap()).unwrap();
+    buf.content()[w + line[..at].chars().count()].modifier
+}
+
+#[test]
+fn the_header_always_says_which_world_this_is_in_words_and_in_reverse_video() {
+    let real = app(status(HEALTHY), vec![]);
+    assert!(header_row(&real).contains("LIVE · GPU-REAL"), "{}", header_row(&real));
+    assert!(badge_cell(&real, "LIVE").contains(ratatui::style::Modifier::REVERSED), "not colour alone");
+    // GPU-REAL only when a GPU reading from the real telemetry is present; otherwise plain LIVE
+    let mut st = status(HEALTHY);
+    st.last_observation.as_mut().unwrap().remove("gpu_uuid");
+    let row = header_row(&app(st, vec![]));
+    assert!(row.contains("LIVE") && !row.contains("GPU-REAL"), "{row}");
+    let mut st = status(HEALTHY);
+    st.last_observation = None;
+    let row = header_row(&app(st, vec![]));
+    assert!(row.contains("LIVE") && !row.contains("REAL"), "{row}");
+    // a simulated session says SIMULATION, never LIVE
+    let mut st = status(HEALTHY);
+    st.mode = Some("SIMULATION".into());
+    let sim = app(st, vec![]);
+    let row = header_row(&sim);
+    assert!(row.contains("SIMULATION") && !row.contains("LIVE"), "{row}");
+    assert!(badge_cell(&sim, "SIMULATION").contains(ratatui::style::Modifier::REVERSED));
 }

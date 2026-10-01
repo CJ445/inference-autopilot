@@ -472,12 +472,15 @@ def test_bad_arguments_are_rejected_with_usage(tui_bin):
 # --- the operator application: palette, system screens, stop ------------------------------------------
 
 def test_the_command_palette_opens_filters_and_navigates(term, cp):
-    t = term(cp.url)
+    t = term(cp.url, rows=120, cols=130)
     assert t.wait_screen("inc_001")
     t.send(b"\x10")                                  # Ctrl+P
     assert t.wait_screen("Search commands")
-    t.send(b"about")
-    assert t.wait_screen("Open About") and not t.screen().count("Open Overview")
+    t.send(b"activ")
+    assert t.wait_screen("Go to Activity") and not t.screen().count("Go to Overview")
+    t.send(b"\x7f" * 5)                              # Backspace clears the query
+    t.send(b"syst")
+    assert t.wait_screen("Go to System") and not t.screen().count("Go to Activity")
     t.send(b"\r")
     assert t.wait_screen("Autonomous AIOps for LLM inference")
     assert t.wait_screen("Python")                    # the control plane's real /version answer
@@ -485,18 +488,18 @@ def test_the_command_palette_opens_filters_and_navigates(term, cp):
     assert t.proc.wait(timeout=10) == 0
 
 
-def test_settings_show_the_servers_real_active_configuration(term, cp):
-    t = term(cp.url)
+def test_system_shows_the_servers_real_active_configuration(term, cp):
+    t = term(cp.url, rows=120, cols=130)             # System is one tall scroll of four sections
     assert t.wait_screen("inc_001")
-    t.send(b"5")
+    t.send(b"4")
     assert t.wait_screen("/etc/aiops/aiops.toml") and t.wait_screen("● Valid")
     assert t.wait_screen("[workload]") and t.wait_screen("vllm-0")
 
 
-def test_diagnostics_show_the_doctors_results_from_the_server(term, cp):
-    t = term(cp.url)
+def test_system_shows_the_doctors_results_from_the_server(term, cp):
+    t = term(cp.url, rows=120, cols=130)
     assert t.wait_screen("inc_001")
-    t.send(b"6")
+    t.send(b"4")
     for needle in ["● PASS", "● WARN", "○ NOT_APPLICABLE", "3.13.5", "only 900 MiB free", "Warnings"]:
         assert t.wait_screen(needle), needle
 

@@ -199,10 +199,7 @@ pub fn render(f: &mut Frame, app: &App) {
         Screen::Detail(id) => detail(f, pane, app, id),
         Screen::Audit if app.details => audit(f, pane, app),
         Screen::Audit => audit_plain(f, pane, app),
-        Screen::ControlPlane => control_plane(f, pane, app),
-        Screen::Settings => settings(f, pane, app),
-        Screen::Diagnostics => diagnostics(f, pane, app),
-        Screen::About => about(f, pane, app),
+        Screen::System => system(f, pane, app),
         Screen::Help => help(f, pane, app),
     }
     footer(f, foot, app);
@@ -260,6 +257,8 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
             let age = app.data_age().map_or(0, |d| d.as_secs());
             chips.push(bold(format!("STALE {age}s  "), WARNING));
         }
+        chips.push(mode_badge(app));
+        chips.push(plain("  "));
         if s.status.mode.as_deref() == Some("SIMULATION") {
             // a simulated session has no real watchdog or telemetry to report on
             chips.push(muted("simulated session"));
@@ -290,13 +289,28 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(vec![title, Line::from(chips)]).block(block), area);
 }
 
+/// Which world this is, in words and in reverse video (so it does not rest on colour alone).
+/// REAL claims only what the data shows: GPU-REAL needs a GPU reading from the real telemetry
+/// (a finer claim, such as which container runtime, would need the TUI to name it: it does not).
+fn mode_badge(app: &App) -> Span<'static> {
+    let Some(s) = &app.snapshot else { return muted("") };
+    let (text, color) = if s.status.mode.as_deref() == Some("SIMULATION") {
+        ("SIMULATION", WARNING)
+    } else if s.status.last_observation.as_ref().is_some_and(|o| text(o, "gpu_uuid").is_some()) {
+        ("LIVE · GPU-REAL", HEALTHY)
+    } else {
+        ("LIVE", HEALTHY)
+    };
+    Span::styled(format!(" {text} "), fg(color).add_modifier(Modifier::REVERSED | Modifier::BOLD))
+}
+
 fn sidebar(f: &mut Frame, area: Rect, app: &App) {
     let w = area.width.saturating_sub(1) as usize; // the right border takes a column
     let here = match &app.screen {
         Screen::Detail(_) => &Screen::Incidents,
         other => other,
     };
-    let active = SCREEN_ORDER.iter().position(|s| s == here).unwrap_or(0);
+    let active = SCREEN_ORDER.iter().position(|s| s == here).unwrap_or(usize::MAX);
     let open = app.rows().iter().filter(|i| !is_closed(&i.status)).count();
     let roomy = area.height >= 16;          // blank rows between items only when there is room
     let item = |idx: usize, label: &str, upper: bool| {
@@ -311,27 +325,23 @@ fn sidebar(f: &mut Frame, area: Rect, app: &App) {
         }
         if idx == active { highlighted(spans, w) } else { Line::from(spans) }
     };
-    let group = |name: &str| Line::from(muted(format!(" {name}")));
     let mut lines = Vec::new();
     if roomy {
         lines.push(blank());
     }
-    for (idx, label) in ["Overview", "Incidents", "Audit"].into_iter().enumerate() {
+    for (idx, label) in ["Overview", "Incidents", "Activity", "System"].into_iter().enumerate() {
         lines.push(item(idx, label, true));
         if roomy {
             lines.push(blank());
         }
     }
     lines.push(hline(w + 1));
-    lines.push(group("SYSTEM"));
-    lines.push(item(3, "Control Plane", false));
-    if roomy {
-        lines.push(blank());
-    }
-    lines.push(group("OPERATOR"));
-    for (idx, label) in [(4, "Settings"), (5, "Diagnostics"), (6, "About"), (7, "Help")] {
-        lines.push(item(idx, label, false));
-    }
+    let help_here = app.screen == Screen::Help;
+    lines.push(if help_here {
+        highlighted(vec![bold(" ▌ ", ACCENT), bold("Help  ?", ACCENT)], w)
+    } else {
+        Line::from(vec![plain("   "), muted("Help  ?")])
+    });
     let block = Block::default().borders(Borders::RIGHT).border_style(fg(BORDER));
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
@@ -372,13 +382,11 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 hints.push(("P", "Practice", true, 4));
             }
-            if app.screen != Screen::Diagnostics {
+            if app.screen == Screen::System {
+                hints.push(("D", "Run checks again", true, 7));
+                hints.push(("X", "Stop", true, 7));
+            } else {
                 hints.push(("D", if app.details { "Simple view" } else { "Details" }, true, 5));
-            }
-            match app.screen {
-                Screen::Diagnostics => hints.push(("D", "Run again", true, 7)),
-                Screen::ControlPlane => hints.push(("X", "Stop", true, 7)),
-                _ => {}
             }
             let cost = |h: &(&str, &str, bool, u8)| h.0.chars().count() + h.1.chars().count() + 4;
             while 1 + hints.iter().map(cost).sum::<usize>() > area.width as usize && hints.len() > 1 {
@@ -517,10 +525,7 @@ fn row_kv(label: &str, value: &str) -> Line<'static> {
 
 /// The loud one-line label shown on every screen while a simulation is on screen.
 fn practice_banner(f: &mut Frame, area: Rect, app: &App) {
-    let real_system_screen = matches!(
-        app.screen,
-        Screen::ControlPlane | Screen::Settings | Screen::Diagnostics | Screen::About
-    );
+    let real_system_screen = app.screen == Screen::System;
     let note = if real_system_screen {
         "These screens show the real system; the practice itself touches nothing real."
     } else {
@@ -1523,9 +1528,8 @@ fn uptime(secs: f64) -> String {
     }
 }
 
-fn control_plane(f: &mut Frame, area: Rect, app: &App) {
-    let w = area.width as usize;
-    let mut l = vec![blank(), rule("Control plane", None, w)];
+fn control_plane_lines(app: &App, w: usize) -> Vec<Line<'static>> {
+    let mut l = vec![rule("Control plane", None, w)];
     let status = match &app.conn {
         Conn::Online => bold("● ONLINE", HEALTHY),
         Conn::Connecting => bold("… CONNECTING", WARNING),
@@ -1575,14 +1579,12 @@ fn control_plane(f: &mut Frame, area: Rect, app: &App) {
     l.push(split_row(vec![plain(" "), bold("[ X ] ", ACCENT), plain("Stop control plane")], vec![], w));
     l.push(Line::from(muted(" Stopping ends the control plane and its watchdog; the managed workload is")));
     l.push(Line::from(muted(" not touched. Start it again with `aiops` (or `aiops start`).")));
-    f.render_widget(Paragraph::new(l).scroll((app.scroll, 0)), area);
+    l
 }
 
-fn settings(f: &mut Frame, area: Rect, app: &App) {
-    let w = area.width as usize;
+fn settings_lines(app: &App, w: usize) -> Vec<Line<'static>> {
     let ms = |v: Option<u64>| v.map_or("N/A".to_string(), |n| format!("{n} ms"));
     let mut l = vec![
-        blank(),
         rule("Client", Some(muted("this terminal UI")), w),
         kv("API", vec![plain(app.url.clone())]),
         kv("Refresh", vec![plain(ms(app.client.interval_ms)), muted("   --interval-ms")]),
@@ -1611,7 +1613,7 @@ fn settings(f: &mut Frame, area: Rect, app: &App) {
     }
     l.push(blank());
     l.push(Line::from(muted(" Edit the file, then `aiops stop` and `aiops` to apply. This screen never changes it.")));
-    f.render_widget(Paragraph::new(l).scroll((app.scroll, 0)), area);
+    l
 }
 
 fn check_chip(status: &str) -> Span<'static> {
@@ -1628,17 +1630,16 @@ fn check_note(c: &Check) -> &'static str {
     if c.status == "FAIL" && !c.blocking { "  (workload health; does not block start)" } else { "" }
 }
 
-fn diagnostics(f: &mut Frame, area: Rect, app: &App) {
-    let w = area.width as usize;
+fn diagnostics_lines(app: &App, w: usize) -> Vec<Line<'static>> {
     let note = match &app.diag {
         Remote::Ready(d) => d.duration_seconds.map(|s| muted(format!("ran in {s:.1}s"))),
         _ => None,
     };
-    let mut l = vec![blank(), rule("Diagnostics", note, w)];
+    let mut l = vec![rule("Diagnostics", note, w)];
     match pending(&app.diag, app) {
         Some(line) => l.push(line),
         None => {
-            let Remote::Ready(d) = &app.diag else { return };
+            let Remote::Ready(d) = &app.diag else { return l };
             for c in &d.results {
                 let room = w.saturating_sub(40).max(10);
                 let detail: String = if c.detail.chars().count() > room {
@@ -1674,20 +1675,14 @@ fn diagnostics(f: &mut Frame, area: Rect, app: &App) {
             }
         }
     }
-    f.render_widget(Paragraph::new(l).scroll((app.scroll, 0)), area);
+    l
 }
 
-fn about(f: &mut Frame, area: Rect, app: &App) {
-    let w = area.width as usize;
+fn about_lines(app: &App, w: usize) -> Vec<Line<'static>> {
     let mut l = vec![
-        blank(),
-        Line::from(vec![plain(" "), bold("AIOPS", ACCENT)]),
-        Line::from(muted(" Autonomous AIOps for LLM inference infrastructure")),
-        blank(),
-        rule("Operator UI", None, w),
-        kv("Version", vec![plain(env!("CARGO_PKG_VERSION"))]),
-        blank(),
-        rule("Control plane", None, w),
+        rule("About", None, w),
+        Line::from(vec![plain(" "), bold("AIOPS", ACCENT), muted("  Autonomous AIOps for LLM inference infrastructure")]),
+        kv("Operator UI", vec![plain(env!("CARGO_PKG_VERSION"))]),
     ];
     match pending(&app.version, app) {
         Some(line) => l.push(line),
@@ -1711,6 +1706,22 @@ fn about(f: &mut Frame, area: Rect, app: &App) {
         Conn::Connecting => span("… connecting", WARNING),
         Conn::Offline { .. } => span("✗ not connected", CRITICAL),
     }]));
+    l
+}
+
+/// System: the control plane, its checks, its read-only configuration and About, in one scroll.
+fn system(f: &mut Frame, area: Rect, app: &App) {
+    let w = area.width as usize;
+    let mut l = vec![blank()];
+    for (n, section) in [control_plane_lines(app, w), diagnostics_lines(app, w), settings_lines(app, w), about_lines(app, w)]
+        .into_iter()
+        .enumerate()
+    {
+        if n > 0 {
+            l.push(blank());
+        }
+        l.extend(section);
+    }
     f.render_widget(Paragraph::new(l).scroll((app.scroll, 0)), area);
 }
 
