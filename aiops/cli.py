@@ -15,6 +15,7 @@ USAGE = ("usage: aiops [--config PATH]   (no command: open the operator UI, star
          "                                  plane first if it is not running)\n"
          "       aiops {start|stop|status|doctor} [--config PATH] [--json]\n"
          "       aiops tui [--config PATH] [--url URL] [-- TUI ARGS]   (the operator terminal UI)\n"
+         "       aiops demo [--scenario NAME] [--approve | --reject]   (SIMULATION: no infrastructure)\n"
          "       aiops serve ...   (unmanaged legacy)")
 
 
@@ -98,6 +99,9 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["tui"]:
         return _tui(argv[1:])
+    if argv[:1] == ["demo"]:
+        from aiops.sim.demo import main as demo_main
+        return demo_main(argv[1:])
     if argv[:1] == ["serve"]:
         from aiops.serve import main as serve_main
         return serve_main(argv[1:])

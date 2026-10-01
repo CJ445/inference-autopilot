@@ -5,10 +5,13 @@ import json
 class AuditLog:
     """Append-only hash chain; detects accidental or unauthorized edits (PRD §60)."""
 
-    def __init__(self):
+    def __init__(self, mode=None):
         self.events = []
+        self.mode = mode          # None for the real chain; "SIMULATION" stamps every event
 
     def append(self, event, data):
+        if self.mode:
+            data = {**data, "mode": self.mode}
         prev = self.events[-1]["hash"] if self.events else ""
         self.events.append({"event": event, "data": data, "prev": prev,
                             "hash": self._hash(event, data, prev)})

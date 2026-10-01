@@ -20,7 +20,10 @@ class InvalidTransition(Exception):
 
 
 class Incident:
-    def __init__(self, incident_id, service, category):
+    mode = None  # "SIMULATION" for a simulated incident; absent (None) for a real one
+
+    def __init__(self, incident_id, service, category, mode=None):
+        self.mode = mode
         self.incident_id = incident_id
         self.service = service
         self.category = category
@@ -41,9 +44,12 @@ class Incident:
         )
 
     def to_dict(self):
-        return {"incident_id": self.incident_id, "service": self.service,
-                "category": self.category, "status": self.status,
-                "evidence": self.evidence, "timeline": self.timeline}
+        d = {"incident_id": self.incident_id, "service": self.service,
+             "category": self.category, "status": self.status,
+             "evidence": self.evidence, "timeline": self.timeline}
+        if self.mode:
+            d["mode"] = self.mode
+        return d
 
     @classmethod
     def from_dict(cls, d):

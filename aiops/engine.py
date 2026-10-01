@@ -36,13 +36,14 @@ UNRESPONSIVE_TICKS = 2
 class Engine:
     """One tick: observe -> detect -> incident -> evidence -> RCA -> pending proposal."""
 
-    def __init__(self, telemetry, cluster, config, store=None, presence=None):
+    def __init__(self, telemetry, cluster, config, store=None, presence=None, mode="REAL"):
         self.telemetry, self.cluster, self.config, self.store = telemetry, cluster, config, store
+        self.mode = mode              # "REAL" or "SIMULATION": stamped on audit, incidents, evidence
         self.presence = presence      # optional read-only "is the workload there?" (docker only)
         self.workload_state = None    # 'absent'|'stopped'|'starting'|'running'|'unknown'|None
         self._unresponsive_streak = 0  # consecutive ticks on which the inference probe failed
         self.incidents, self.pending = [], {}
-        self.audit, self.health = AuditLog(), "HEALTHY"
+        self.audit, self.health = AuditLog(None if mode == "REAL" else mode), "HEALTHY"
         self.last_observation, self.last_observed_at = None, None
         if store:
             self.incidents, self.pending, self.audit = store.load()
@@ -238,7 +239,7 @@ class Engine:
 
     def _open_incident(self, observed, category):
         incident = Incident(f"inc_{len(self.incidents) + 1:03d}", self.config["service"],
-                            category)
+                            category, None if self.mode == "REAL" else self.mode)
         self.incidents.append(incident)
         self.audit.append("incident_created", {"incident_id": incident.incident_id})
         incident.transition("TRIAGING")
@@ -285,7 +286,8 @@ class Engine:
                  "source": sources.get(metric, "prometheus"), "metric": metric,
                  "query": queries.get(query_key or metric), "value": value,
                  "relation": "supports" if supports else "contradicts",
-                 "source_type": "real", "incident_id": incident.incident_id}
+                 "source_type": "real" if self.mode == "REAL" else self.mode.lower(),
+                 "incident_id": incident.incident_id}
             if "gpu_uuid" in observed:
                 e["resource"] = observed["gpu_uuid"]
             return e
