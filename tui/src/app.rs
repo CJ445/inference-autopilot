@@ -12,6 +12,7 @@ use crate::timeparse::parse_rfc3339;
 pub const STALE_AFTER: Duration = Duration::from_secs(3);
 /// The control plane's own last observation older than this is flagged as stale telemetry.
 pub const TELEMETRY_STALE_SECS: f64 = 10.0;
+/// A success notice fades after this long. An error stays until the operator presses a key.
 pub const NOTICE_TTL: Duration = Duration::from_secs(10);
 
 /// Statuses the server treats as finished (display grouping only; the server decides).
@@ -196,7 +197,7 @@ pub const KEYMAP: [(&str, &str); 17] = [
     ("S", "Refresh now"),
     ("A", "Approve (on an incident's page, once it awaits a decision)"),
     ("R", "Reject (on an incident's page, once it awaits a decision)"),
-    ("X", "Stop the control plane (Control Plane screen)"),
+    ("X", "Stop the control plane (System)"),
     ("Q", "Quit (the control plane keeps running)"),
     ("Ctrl+C", "Quit"),
 ];
@@ -325,6 +326,9 @@ pub struct App {
     pub practice: bool,
     /// Show the technical views (exact names, raw states, metrics) instead of the plain ones.
     pub details: bool,
+    /// How colours are shown. `App::new` is the semantic (Dark) palette the tests inspect; the
+    /// binary chooses the real one from `--theme` / `NO_COLOR`.
+    pub theme: crate::theme::Theme,
     pub stop_confirm: bool,
     pub stop_opened: Instant,
     /// The dialog that asks before a REAL workload is paused.
@@ -364,6 +368,7 @@ impl App {
             palette: None,
             practice: false,
             details: false,
+            theme: crate::theme::Theme::Dark,
             stop_confirm: false,
             stop_opened: Instant::now(),
             fault_confirm: false,
@@ -435,7 +440,7 @@ impl App {
     }
 
     pub fn active_notice(&self) -> Option<&Notice> {
-        self.notice.as_ref().filter(|n| self.now.saturating_duration_since(n.at) < NOTICE_TTL)
+        self.notice.as_ref().filter(|n| n.is_error || self.now.saturating_duration_since(n.at) < NOTICE_TTL)
     }
 
     // ---- input ---------------------------------------------------------------------------------
@@ -445,6 +450,9 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        if self.notice.as_ref().is_some_and(|n| n.is_error) {
+            self.notice = None;                 // an error was read: the next key acknowledges it
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && key.code == KeyCode::Char('c') {
             return vec![Effect::Quit];

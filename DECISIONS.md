@@ -194,9 +194,27 @@ read-only configuration, about, and the confirmed stop). `?` is Help. The old Se
 About and Control Plane screens become sections of System; no information or action is dropped. `D` on
 System keeps meaning "run diagnostics again" (details are always shown there).
 
-**Accessibility.** The default palette becomes the terminal's own ANSI colors, which follow a light or a
-dark theme (the fixed RGB palette had 1.8 to 2.4:1 contrast on a light background); `--theme dark`
-keeps the old look. `NO_COLOR` (or `--theme mono`) removes color entirely: state is already always a
-word plus a glyph, selection and banners use reverse video. Stale values are no longer dimmed (about
-2.2:1): they stay at full contrast and carry an explicit "Stale · observed Ns ago". Error messages stay
-until the next key press instead of vanishing after 10 seconds.
+**Accessibility (measured, WCAG contrast).** On a white background the old fixed RGB palette gave:
+secondary text 3.6:1, green 2.0:1, amber 1.9:1, accent blue 2.5:1 (4.5:1 is the bar for normal text);
+the `DIM` modifier used for stale values gave about 2.1:1 on black and 1.8:1 on white. On a dark
+background the same colours are fine (5.8 to 11:1) except the border grey (2.1:1, decoration only).
+So the default is now the terminal's own named colours (`--theme terminal`), which follow the user's
+light or dark theme; secondary text is the terminal's normal text colour, never a fixed grey; rules
+and borders are the only dark grey (decoration, never information). `--theme dark` keeps the old fixed
+palette. `NO_COLOR` (non-empty, per no-color.org) or `--theme mono` removes every colour: state is
+already a word plus a glyph, the selected row has a `›` marker, and the banners and the mode badge are
+reverse video, which survives without colour. The theme is applied to the finished frame
+(`theme::apply`), so no widget picks a colour for a theme; `App::new` stays on the semantic palette so
+the existing render tests keep inspecting the constants. Stale values are not dimmed any more: they
+stay at full contrast under an explicit line, "Stale · last values observed Ns ago". An error notice
+stays until the next key press (a success notice still fades after 10 s). A skipped pipeline stage had
+used the border grey for real text; it now uses the secondary text colour.
+
+**Mode badge, and a deviation.** The header always carries `LIVE · GPU-REAL`, `LIVE` or `SIMULATION`
+as a reverse-video chip. The brief also names `LOCAL-REAL`; telling a local container from anything
+else would require the TUI to compare the provider's name against "docker", which the static safety
+scan (`tui/tests/safety.rs`) forbids anywhere in the TUI source, and that scan is not weakened.
+`GPU-REAL` rests on the data instead: a GPU reading (`gpu_uuid`) from the real telemetry is present.
+
+**Screens.** `--screen` accepts `system` and `activity`; the old `control`, `settings`, `diagnostics`
+and `about` are aliases for `system`. Keys `5`..`7` no longer exist (four areas; Help is `?`).

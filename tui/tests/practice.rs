@@ -239,13 +239,15 @@ fn the_palette_offers_practice_and_only_offers_exit_while_practicing() {
 
 // --- what the operator sees --------------------------------------------------------------------------
 
-fn bg_of_banner(buf: &ratatui::buffer::Buffer) -> Option<ratatui::style::Color> {
+/// The banner's colour and whether it is reverse video (a solid bar that does not rest on colour alone).
+fn bg_of_banner(buf: &ratatui::buffer::Buffer) -> Option<(ratatui::style::Color, bool)> {
     let w = buf.area.width as usize;
     let cells = buf.content();
     for row in 0..buf.area.height as usize {
         let line: String = (0..w).map(|x| cells[row * w + x].symbol().to_string()).collect();
         if let Some(b) = line.find("PRACTICE · SIMULATION") {
-            return Some(cells[row * w + line[..b].chars().count()].bg);
+            let cell = &cells[row * w + line[..b].chars().count()];
+            return Some((cell.fg, cell.modifier.contains(ratatui::style::Modifier::REVERSED)));
         }
     }
     None
@@ -258,7 +260,7 @@ fn the_banner_is_on_every_screen_in_practice_and_never_otherwise() {
         a.handle_key(key(n));
         let s = screen(&a);
         has(&s, "PRACTICE · SIMULATION");
-        assert_eq!(bg_of_banner(&ui::render_to_buffer(&a, 120, 40)), Some(theme::WARNING), "{n}");
+        assert_eq!(bg_of_banner(&ui::render_to_buffer(&a, 120, 40)), Some((theme::WARNING, true)), "{n}");
     }
     let mut real = real_app();
     for n in "1234567?".chars() {

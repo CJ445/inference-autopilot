@@ -129,18 +129,10 @@ fn highlighted(mut spans: Vec<Span<'static>>, width: usize) -> Line<'static> {
     Line::from(spans.into_iter().map(|s| Span::styled(s.content, s.style.patch(bg))).collect::<Vec<_>>())
 }
 
-fn dimmed(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
-    lines
-        .into_iter()
-        .map(|l| {
-            Line::from(
-                l.spans
-                    .into_iter()
-                    .map(|s| Span::styled(s.content, s.style.add_modifier(Modifier::DIM)))
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .collect()
+/// The values on screen are old: say so in words, at full contrast (dimming made them unreadable).
+fn stale_line(app: &App) -> Option<Line<'static>> {
+    let age = if app.is_stale() { app.data_age().map(|d| d.as_secs() as f64) } else if app.telemetry_stale() { app.telemetry_age_secs() } else { None }?;
+    Some(Line::from(vec![plain(" "), bold(format!("Stale · last values observed {age:.0}s ago"), WARNING)]))
 }
 
 fn state_chip(status: &str) -> Span<'static> {
@@ -212,6 +204,7 @@ pub fn render(f: &mut Frame, app: &App) {
     } else if app.palette.is_some() {
         palette_modal(f, area, app);
     }
+    theme::apply(f.buffer_mut(), app.theme);
 }
 
 pub fn render_to_buffer(app: &App, width: u16, height: u16) -> Buffer {
@@ -448,11 +441,13 @@ fn overview(f: &mut Frame, area: Rect, app: &App) {
     l.push(blank());
     l.extend(incident_rows(app, w));
     l.push(blank());
-    let stale = app.is_stale() || app.telemetry_stale();
-    let section = |lines: Vec<Line<'static>>| if stale { dimmed(lines) } else { lines };
-    l.extend(section(inference_section(app, w)));
+    if let Some(line) = stale_line(app) {
+        l.push(line);
+        l.push(blank());
+    }
+    l.extend(inference_section(app, w));
     l.push(blank());
-    l.extend(section(gpu_section(app, w)));
+    l.extend(gpu_section(app, w));
     l.push(blank());
     l.extend(safety_section(app, w));
     f.render_widget(Paragraph::new(l), area);
@@ -483,7 +478,7 @@ fn fault_banner(f: &mut Frame, area: Rect, app: &App) {
     } else {
         format!("resumes by itself in {}m {:02}s", left as u64 / 60, left as u64 % 60)
     };
-    let style = Style::default().fg(Color::Black).bg(CRITICAL).add_modifier(Modifier::BOLD);
+    let style = fg(CRITICAL).add_modifier(Modifier::REVERSED | Modifier::BOLD);
     // The facts always fit; the hint for ending it sooner is added only when there is room.
     let base = format!(" LIVE · GPU-REAL · FAULT ACTIVE   The real workload is paused; it {when}.");
     let full = format!("{base}  Ctrl+P → Resume the workload now");
@@ -531,7 +526,7 @@ fn practice_banner(f: &mut Frame, area: Rect, app: &App) {
     } else {
         "Nothing here touches your GPU, containers, or real workload."
     };
-    let style = Style::default().fg(Color::Black).bg(WARNING).add_modifier(Modifier::BOLD);
+    let style = fg(WARNING).add_modifier(Modifier::REVERSED | Modifier::BOLD);
     let text = format!(" PRACTICE · SIMULATION   {note}");
     let pad = " ".repeat((area.width as usize).saturating_sub(text.chars().count()));
     f.render_widget(Paragraph::new(Line::from(Span::styled(format!("{text}{pad}"), style))), area);
@@ -796,6 +791,9 @@ fn overview_plain(f: &mut Frame, area: Rect, app: &App) {
     let w = area.width as usize;
     let (headline, color) = overall(app);
     let mut l = vec![blank(), Line::from(vec![plain(" "), bold(headline, color)])];
+    if let Some(line) = stale_line(app) {
+        l.push(line);
+    }
     if app.practice {
         l.push(blank());
         l.extend(practice_guide(app));
@@ -969,7 +967,7 @@ fn plain_tracker(status: &str, width: usize) -> Option<Line<'static>> {
             Stage::Done => plain(*name),
             Stage::Current => Span::styled(name.to_string(), fg(ACCENT).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
             Stage::Todo => muted(*name),
-            Stage::Skipped => Span::styled(name.to_string(), fg(BORDER).add_modifier(Modifier::CROSSED_OUT)),
+            Stage::Skipped => Span::styled(name.to_string(), fg(theme::TEXT_MUTED).add_modifier(Modifier::CROSSED_OUT)),
         });
     }
     Some(Line::from(spans))
@@ -1252,7 +1250,7 @@ fn tracker(status: &str, width: usize) -> Option<Line<'static>> {
             Stage::Done => plain(*name),
             Stage::Current => Span::styled(name.to_string(), fg(ACCENT).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
             Stage::Todo => muted(*name),
-            Stage::Skipped => Span::styled(name.to_string(), fg(BORDER).add_modifier(Modifier::CROSSED_OUT)),
+            Stage::Skipped => Span::styled(name.to_string(), fg(theme::TEXT_MUTED).add_modifier(Modifier::CROSSED_OUT)),
         });
     }
     Some(Line::from(spans))
@@ -1733,8 +1731,9 @@ fn help(f: &mut Frame, area: Rect, app: &App) {
     }
     l.push(blank());
     l.push(rule("How it fits together", None, w));
-    l.push(Line::from(muted(" Workload remediation: incident → policy → your approval (A) → the server")));
-    l.push(Line::from(muted(" executes and verifies it. Stopping the control plane is separate (screen 4).")));
+    l.push(Line::from(muted(" A problem is found, a fix is proposed, and nothing happens until you approve it (A).")));
+    l.push(Line::from(muted(" The server then runs the fix and checks that the model recovered. D shows the")));
+    l.push(Line::from(muted(" technical details behind any screen. Stopping the control plane is in System (4).")));
     l.push(blank());
     l.push(rule("Testing the real system", None, w));
     l.push(Line::from(muted(" Ctrl+P, then \"Break the real workload (pause)…\" asks first, pauses the real")));

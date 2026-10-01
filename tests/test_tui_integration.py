@@ -219,7 +219,7 @@ def test_the_tui_shows_the_live_state_of_the_real_control_plane(term, cp):
     t = term(cp.url)
     assert t.wait_for("● CONTROL ONLINE")
     for needle in ["stand-in", "inc_001", "GPU memory is above its limit", "Needs your OK"]:
-        assert t.wait_for(needle), needle                       # the plain default view
+        assert t.wait_screen(needle), needle                    # the plain default view
     t.send(b"d")                                                # D: the technical view
     for needle in ["GPU_MEMORY_PRESSURE", "AWAITING APPROVAL", "restart_workload", "● ARMED",
                    "AUDIT ✓ VERIFIED"]:
@@ -375,7 +375,7 @@ def test_a_malformed_server_never_crashes_the_tui(term):
     try:
         t = term(f"http://127.0.0.1:{port}")
         assert t.wait_for("CONTROL PLANE OFFLINE")
-        assert t.wait_for("unexpected response")
+        assert t.wait_screen("unexpected response")
         assert t.proc.poll() is None
         t.send(b"q")
         assert t.proc.wait(timeout=10) == 0
@@ -405,7 +405,7 @@ def test_a_slow_server_times_out_and_the_tui_stays_responsive(tui_bin):
     t = Term(tui_bin, f"http://127.0.0.1:{port}", extra=("--timeout-ms", "500"))
     try:
         assert t.wait_for("CONTROL PLANE OFFLINE", timeout=15)
-        assert t.wait_for("did not answer in time", timeout=15)
+        assert t.wait_screen("did not answer in time", timeout=15)
         t.send(b"q")                                  # still responds to keys
         assert t.proc.wait(timeout=10) == 0
     finally:

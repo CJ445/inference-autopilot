@@ -186,7 +186,10 @@ fn an_active_fault_is_a_red_banner_on_every_screen_with_the_time_left() {
         let row = (0..buf.area.height as usize)
             .find(|r| (0..w).map(|x| buf.content()[r * w + x].symbol().to_string()).collect::<String>().contains("FAULT ACTIVE"))
             .unwrap();
-        assert_eq!(buf.content()[row * w + 1].bg, theme::CRITICAL, "{n}");
+        let cell = &buf.content()[row * w + 1];
+        // a solid red bar by reverse video: the colour is the foreground, so it never rests on colour alone
+        assert_eq!(cell.fg, theme::CRITICAL, "{n}");
+        assert!(cell.modifier.contains(ratatui::style::Modifier::REVERSED), "{n}");
     }
     a.wall = T + 30.0;
     has(&screen(&a), "resumes by itself in 60s");
