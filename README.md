@@ -72,6 +72,26 @@ Relative paths in a profile (`db`, `state_file`) resolve next to the profile fil
 and the startup log live in `~/.config/aiops/`. Other examples are in `deploy/profiles/`. A
 profile names exactly one managed workload; unknown keys are errors.
 
+### 5. Provision the vLLM container (docker-real-gpu profile)
+
+The control plane manages exactly one container and **never creates, pulls, starts or stops
+it** (ADR-021); `aiops` refuses to start while it is missing. Create it once, for example:
+
+    docker run -d --name aiops-vllm --gpus device=0 \
+      --label com.inference-autopilot.managed=true \
+      --label com.inference-autopilot.workload=vllm \
+      --memory 8g --cpus 4 --shm-size 1g \
+      -p 127.0.0.1:8001:8000 -v aiops-hf-cache:/hf -e HF_HOME=/hf \
+      --health-cmd "python3 -c \"import urllib.request;urllib.request.urlopen('http://localhost:8000/health',timeout=3)\"" \
+      --health-interval 5s --health-timeout 5s --health-retries 3 --health-start-period 240s \
+      vllm/vllm-openai:v0.10.0 --model facebook/opt-125m \
+      --gpu-memory-utilization 0.35 --max-model-len 512 --enforce-eager
+
+The label value (`workload=vllm`) must equal `[workload] name` in the profile; the container
+name does not matter. Give it a minute or two to load the model (`docker ps` shows `healthy`),
+check with `aiops doctor`, then run `aiops`. Use no Docker restart policy: the project is never
+a permanent background service.
+
 ## Using it
 
     aiops

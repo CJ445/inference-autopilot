@@ -166,6 +166,7 @@ def test_a_start_that_fails_is_reported_with_its_real_output_and_no_tui(tmp_path
                                               ready=lambda p: False, sleep=lambda s: None)
     assert code == 1 and url is None
     assert "could not be started" in out.text and "exited with code 1" in out.text
+    assert out.text.count("refusing to start: 1 blocking") == 1     # streamed once, not repeated
     assert "refusing to start: 1 blocking prerequisite(s) failed" in out.text
     assert "aiops doctor" in out.text
 

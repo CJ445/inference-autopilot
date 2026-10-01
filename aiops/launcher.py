@@ -58,15 +58,18 @@ def _tail(path, n=LOG_TAIL_LINES):
         return []
 
 
-def _fail(out, reason, log, hint="aiops doctor"):
-    out("AIOPS\n\nControl plane could not be started.\n\nReason:")
+def _fail(out, reason, log, hint="aiops doctor", show_tail=True):
+    out("\nControl plane could not be started.\n\nReason:")
     for line in reason.splitlines() or ["unknown"]:
         out(f"  {line}")
-    lines = _tail(log)
+    lines = _tail(log) if show_tail else []
     if lines:
         out(f"\nLast output ({log}):")
         for line in lines:
             out(f"  {line}")
+    if "no managed workload" in "".join(_tail(log, 40)):
+        out("\nThe managed workload (the vLLM container) must already exist: the control plane "
+            "never creates it.\nSee README: \"Provision the vLLM container\".")
     out(f"\nRun diagnostics with:\n  {hint}")
     return 1
 
@@ -132,12 +135,12 @@ def ensure_control_plane(config_path, out=print, spawn=spawn_start, ready=api_re
             if rc == 0 and cp["state"] != "running":
                 reason = "`aiops start` exited without leaving a running control plane"
             else:
-                reason = f"`aiops start` exited with code {rc} (its output is below)"
-            return _fail(out, reason, log), None
+                reason = f"`aiops start` exited with code {rc} (its output is above)"
+            return _fail(out, reason, log, show_tail=False), None   # already streamed above
         if clock() >= deadline:
             return _fail(out, f"the API did not answer within {timeout}s; the control plane "
                               "may still be starting (it is left running; `aiops stop` ends it)",
-                         log, "aiops status"), None
+                         log, "aiops status", show_tail=False), None
         sleep(POLL_SECONDS)
 
 
