@@ -290,3 +290,103 @@ def test_a_missing_default_config_says_where_it_looked(tmp_path, monkeypatch):
     code, _ = launcher.ensure_control_plane("aiops.toml", out=out)
     assert code == 2 and "configuration error" in out.text
     assert "~/.config/aiops/aiops.toml" in out.text and "--config" in out.text
+
+
+# --- first run: no configuration anywhere -------------------------------------------------------------
+
+@pytest.fixture
+def firstrun(tmp_path, monkeypatch):
+    """A directory with no ./aiops.toml and a config home that does not exist yet."""
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    fake_bin = tmp_path / "aiops-tui"
+    fake_bin.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("AIOPS_TUI_BIN", str(fake_bin))
+    monkeypatch.setattr(signal, "signal", lambda *a: None)
+    home = tmp_path / "xdg"
+    return {"XDG_CONFIG_HOME": str(home)}, home / "aiops" / "aiops.toml"
+
+
+def run_main(argv, environ, answers, tmp_calls):
+    prompts = []
+
+    def ask(prompt):
+        prompts.append(prompt)
+        if not answers:
+            raise EOFError
+        return answers.pop(0)
+
+    code = launcher.main(argv, out=(out := Out()), isatty=lambda: True, environ=environ, ask=ask,
+                         ensure=lambda config, out: (tmp_calls.append(config) or (0, "http://127.0.0.1:1")),
+                         tui_exec=lambda *a: None)
+    return code, out, prompts
+
+
+@pytest.mark.parametrize("answer", ["", "y", "Y", "yes"])
+def test_first_run_offers_to_create_the_default_config_and_carries_on(firstrun, answer):
+    environ, target = firstrun
+    calls = []
+    code, out, prompts = run_main([], environ, [answer], calls)
+    assert target.exists() and calls == [str(target)]                # created, then used
+    assert len(prompts) == 1 and "No aiops configuration found" in out.text
+    assert str(target) in out.text and "never creates it" in out.text
+    profile = load_profile(target)                                   # and it is a valid profile
+    assert profile["name"] == "docker-real-gpu" and profile["workload"]["name"] == "vllm"
+    assert target.read_text() == (ROOT / "deploy" / "profiles" / "docker-real-gpu.toml").read_text()
+
+
+@pytest.mark.parametrize("answers", [["n"], ["no"], ["anything else"], []])     # [] = EOF
+def test_declining_creates_nothing_and_does_not_start_anything(firstrun, answers):
+    environ, target = firstrun
+    calls = []
+    code, out, _ = run_main([], environ, list(answers), calls)
+    assert code == 2 and calls == [] and not target.exists() and not target.parent.exists()
+    assert "Nothing was created" in out.text and "--config" in out.text
+
+
+def test_an_existing_config_means_no_prompt(firstrun, tmp_path):
+    environ, target = firstrun
+    target.parent.mkdir(parents=True)
+    target.write_text("# the operator's own\n")
+    calls = []
+    code, out, prompts = run_main([], environ, [], calls)
+    assert prompts == [] and calls == [str(target)]
+    assert target.read_text() == "# the operator's own\n"              # never overwritten
+
+
+def test_a_local_config_means_no_prompt(firstrun):
+    environ, target = firstrun
+    Path("aiops.toml").write_text("")
+    calls = []
+    _, _, prompts = run_main([], environ, [], calls)
+    assert prompts == [] and calls == ["aiops.toml"] and not target.exists()
+
+
+@pytest.mark.parametrize("argv", [["--config", "nope.toml"], ["--config=nope.toml"]])
+def test_an_explicit_missing_config_is_an_error_not_an_offer(firstrun, argv):
+    environ, target = firstrun
+    calls = []
+    _, _, prompts = run_main(argv, environ, ["y"], calls)
+    assert prompts == [] and not target.exists()                     # never second-guesses --config
+    assert calls == ["nope.toml"]                                    # the launcher reports it
+
+
+def test_creation_never_overwrites_a_file_that_appears_in_the_meantime(firstrun, monkeypatch):
+    environ, target = firstrun
+
+    def ask(prompt):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# written while the prompt was open\n")
+        return "y"
+
+    calls = []
+    launcher.main([], out=Out(), isatty=lambda: True, environ=environ, ask=ask,
+                  ensure=lambda c, out: (calls.append(c) or (0, "http://127.0.0.1:1")),
+                  tui_exec=lambda *a: None)
+    assert target.read_text() == "# written while the prompt was open\n"
+
+
+def test_the_embedded_default_is_exactly_the_documented_example_profile():
+    from aiops.default_profile import TEMPLATE
+    assert TEMPLATE == (ROOT / "deploy" / "profiles" / "docker-real-gpu.toml").read_text()

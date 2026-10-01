@@ -24,6 +24,9 @@ fn incident(json: &str, id: &str) -> Incident {
     i.incident_id = id.into();
     i
 }
+fn status_of(json: &str) -> Status {
+    status(json)
+}
 fn status(json: &str) -> Status {
     serde_json::from_str(json).unwrap()
 }
@@ -284,33 +287,69 @@ fn a_long_detail_can_be_scrolled() {
 // --- confirmation and results ----------------------------------------------------------------
 
 #[test]
-fn approval_is_confirmed_with_the_exact_action_and_workload() {
-    let mut a = app(UNRESPONSIVE, vec![incident(PENDING, "inc_001")]);
+fn approval_is_confirmed_with_the_incident_the_reason_and_the_effect() {
+    let mut a = detail_app(PENDING);                       // review the incident first
     ch(&mut a, 'a');
-    let s = text(&a, 110, 32);
-    for needle in ["Approve restart_workload?", "Workload:", "vllm", "Action:", "restart_workload",
+    let s = text(&a, 110, 40);
+    for needle in ["Approve restart_workload?", "Incident", "inc_001", "INFERENCE_UNRESPONSIVE", "Workload", "vllm",
+                   "Why", "Inference requests are failing or timing out", "Effect",
+                   "Restarts the workload", "no rollback",
                    "[Enter] Confirm", "[Esc] Cancel"] {
         has(&s, needle);
     }
 }
 
 #[test]
-fn rejection_has_its_own_clearly_labelled_confirmation() {
-    let mut a = app(UNRESPONSIVE, vec![incident(PENDING, "inc_001")]);
-    ch(&mut a, 'r');
-    let s = text(&a, 110, 32);
-    has(&s, "Reject restart_workload?");
-    lacks(&s, "Approve restart_workload?");
+fn the_confirm_key_looks_inactive_until_the_guard_has_elapsed() {
+    let mut a = detail_app(PENDING);
+    ch(&mut a, 'a');
+    assert_eq!(colour_of(&ui::render_to_buffer(&a, 110, 40), "[Enter] Confirm"), theme::TEXT_MUTED);
+    a.now += std::time::Duration::from_millis(600);
+    assert_eq!(colour_of(&ui::render_to_buffer(&a, 110, 40), "[Enter] Confirm"), theme::ACCENT);
 }
 
 #[test]
-fn while_the_server_works_the_operator_sees_that_it_is_working() {
-    let mut a = app(UNRESPONSIVE, vec![incident(PENDING, "inc_001")]);
+fn rejection_has_its_own_clearly_labelled_confirmation() {
+    let mut a = detail_app(PENDING);
+    ch(&mut a, 'r');
+    let s = text(&a, 110, 40);
+    has(&s, "Reject restart_workload?");
+    has(&s, "No action is taken on the workload");
+    lacks(&s, "Approve restart_workload?");
+    lacks(&s, "no rollback");
+}
+
+#[test]
+fn while_the_server_works_the_operator_sees_that_it_is_working_and_what_the_server_says() {
+    let mut a = detail_app(PENDING);
     ch(&mut a, 'a');
+    a.now += std::time::Duration::from_millis(600);
     key(&mut a, KeyCode::Enter);
-    let s = text(&a, 110, 32);
-    has(&s, "Waiting for the server");
-    has(&s, "inc_001");
+    let s = text(&a, 110, 40);
+    for needle in ["Waiting for the server", "Approve inc_001 sent", "Server state", "● AWAITING APPROVAL",
+                   "INFERENCE_UNRESPONSIVE", "Evidence"] {
+        has(&s, needle);                       // an inline banner: the incident stays visible
+    }
+    lacks(&s, "In progress");                  // no blocking modal any more
+}
+
+#[test]
+fn the_banner_follows_the_servers_state_and_never_predicts_it() {
+    let mut a = detail_app(PENDING);
+    ch(&mut a, 'a');
+    a.now += std::time::Duration::from_millis(600);
+    key(&mut a, KeyCode::Enter);
+    for (status, shown) in [("EXECUTING", "● EXECUTING"), ("VERIFYING", "● VERIFYING")] {
+        let mut inc = incident(PENDING, "inc_001");
+        inc.status = status.into();
+        a.apply(Msg::Poll(Ok(Snapshot::new(status_of(UNRESPONSIVE), vec![inc]))));
+        let s = text(&a, 110, 40);
+        has(&s, "Waiting for the server");
+        has(&s, &format!("Server state  {shown}"));
+    }
+    a.apply(Msg::Action { kind: aiops_tui::app::ActionKind::Approve, id: "inc_001".into(),
+                          result: Ok(incident(RESOLVED, "inc_001")) });
+    lacks(&text(&a, 110, 40), "Waiting for the server");     // gone when the server has answered
 }
 
 #[test]
@@ -541,8 +580,11 @@ fn the_footer_never_drops_quit_even_in_a_narrow_terminal() {
 #[test]
 fn a_and_r_are_visibly_inactive_unless_the_selected_incident_awaits_a_decision() {
     let key_colour = |a: &App, k: &str| colour_of(&ui::render_to_buffer(a, 110, 32), k);
-    let waiting = app(UNRESPONSIVE, vec![incident(PENDING, "inc_001")]);
-    let resolved = app(HEALTHY, vec![incident(RESOLVED, "inc_001")]);
+    let mut waiting = app(UNRESPONSIVE, vec![incident(PENDING, "inc_001")]);
+    assert_eq!(key_colour(&waiting, "A Approve"), theme::TEXT_MUTED, "not live on the list screens");
+    key(&mut waiting, KeyCode::Enter);                 // on the incident's own page it is live
+    let mut resolved = app(HEALTHY, vec![incident(RESOLVED, "inc_001")]);
+    key(&mut resolved, KeyCode::Enter);
     assert_ne!(key_colour(&waiting, "A Approve"), theme::TEXT_MUTED);
     assert_eq!(key_colour(&resolved, "A Approve"), theme::TEXT_MUTED);
     assert_eq!(key_colour(&resolved, "R Reject"), theme::TEXT_MUTED);

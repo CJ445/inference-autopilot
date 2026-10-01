@@ -13,7 +13,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::{Frame, Terminal};
 use serde_json::Value;
 
-use crate::app::{is_closed, App, Conn, Remote, Screen, KEYMAP, SCREEN_ORDER};
+use crate::app::{is_closed, ActionKind, App, Conn, Remote, Screen, CONFIRM_GUARD, KEYMAP, SCREEN_ORDER};
 use crate::model::{flag, num, text, Check, Evidence, Incident, Obj, Watchdog};
 use crate::theme::{self, ACCENT, BORDER, CRITICAL, HEALTHY, TEXT_MUTED, WARNING};
 use crate::timeparse::{clock_hms, parse_rfc3339};
@@ -92,9 +92,9 @@ fn hline(width: usize) -> Line<'static> {
     Line::from(span(format!(" {}", "─".repeat(width.saturating_sub(2))), BORDER))
 }
 
-/// Greedy word wrap into one-space-indented lines (the pane keeps its margin when text wraps).
-fn wrapped(content: &str, width: usize) -> Vec<Line<'static>> {
-    let room = width.saturating_sub(2).max(10);
+/// Greedy word wrap to `room` columns.
+fn wrap_words(content: &str, room: usize) -> Vec<String> {
+    let room = room.max(10);
     let mut out: Vec<String> = Vec::new();
     for word in content.split_whitespace() {
         match out.last_mut() {
@@ -105,7 +105,12 @@ fn wrapped(content: &str, width: usize) -> Vec<Line<'static>> {
             _ => out.push(word.to_string()),
         }
     }
-    out.into_iter().map(|l| Line::from(format!(" {l}"))).collect()
+    out
+}
+
+/// Word wrap into one-space-indented lines (the pane keeps its margin when text wraps).
+fn wrapped(content: &str, width: usize) -> Vec<Line<'static>> {
+    wrap_words(content, width.saturating_sub(2)).into_iter().map(|l| Line::from(format!(" {l}"))).collect()
 }
 
 /// A labelled row: the label is quiet, the value carries the colour.
@@ -161,26 +166,35 @@ pub fn render(f: &mut Frame, app: &App) {
         .constraints([Constraint::Length(SIDEBAR_W), Constraint::Min(20)])
         .split(rows[1]);
     sidebar(f, body[0], app);
+    // An approve/reject in flight is shown inline, above the screen it was started from.
+    let pane = if app.busy.is_some() && body[1].height > 8 {
+        let split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(1)])
+            .split(body[1]);
+        progress_banner(f, split[0], app);
+        split[1]
+    } else {
+        body[1]
+    };
     match &app.screen {
-        Screen::Dashboard => overview(f, body[1], app),
-        Screen::Incidents => incidents(f, body[1], app),
-        Screen::Detail(id) => detail(f, body[1], app, id),
-        Screen::Audit => audit(f, body[1], app),
-        Screen::ControlPlane => control_plane(f, body[1], app),
-        Screen::Settings => settings(f, body[1], app),
-        Screen::Diagnostics => diagnostics(f, body[1], app),
-        Screen::About => about(f, body[1], app),
-        Screen::Help => help(f, body[1], app),
+        Screen::Dashboard => overview(f, pane, app),
+        Screen::Incidents => incidents(f, pane, app),
+        Screen::Detail(id) => detail(f, pane, app, id),
+        Screen::Audit => audit(f, pane, app),
+        Screen::ControlPlane => control_plane(f, pane, app),
+        Screen::Settings => settings(f, pane, app),
+        Screen::Diagnostics => diagnostics(f, pane, app),
+        Screen::About => about(f, pane, app),
+        Screen::Help => help(f, pane, app),
     }
     footer(f, rows[2], app);
     if app.confirm.is_some() {
         confirm_modal(f, area, app);
     } else if app.stop_confirm {
-        stop_modal(f, area);
+        stop_modal(f, area, app);
     } else if app.palette.is_some() {
         palette_modal(f, area, app);
-    } else if app.busy.is_some() {
-        busy_modal(f, area, app);
     }
 }
 
@@ -298,9 +312,10 @@ fn sidebar(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-/// A and R are live only when the selected incident is awaiting a decision.
+/// A and R are live only on an incident's own page, and only while it awaits a decision.
 fn can_decide(app: &App) -> bool {
-    matches!(app.conn, Conn::Online)
+    matches!(app.screen, Screen::Detail(_))
+        && matches!(app.conn, Conn::Online)
         && app.busy.is_none()
         && app.selected_incident().map_or(false, awaiting_decision)
 }
@@ -319,7 +334,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
             let mut hints = vec![
                 ("↑↓", "Navigate", true, 5), ("Enter", "Inspect", true, 6), ("A", "Approve", live, 7),
                 ("R", "Reject", live, 7), ("Esc", "Back", true, 3), ("S", "Refresh", true, 4),
-                ("Tab", "Screens", true, 2), ("Ctrl+P", "Commands", true, 8), ("?", "Help", true, 1),
+                ("←→", "Screens", true, 2), ("Ctrl+P", "Commands", true, 8), ("?", "Help", true, 1),
                 ("Q", "Quit", true, 9),
             ];
             match app.screen {
@@ -924,35 +939,73 @@ fn modal_block(title: &str, color: Color) -> Block<'static> {
 
 fn confirm_modal(f: &mut Frame, area: Rect, app: &App) {
     let Some(c) = &app.confirm else { return };
-    let rect = centered(area, 56, 11);
-    f.render_widget(Clear, rect);
-    let lines = vec![
+    let width: u16 = 74.min(area.width);
+    let room = (width as usize).saturating_sub(16);
+    let row = |label: &str, value: String| {
+        Line::from(vec![plain(" "), muted(format!("{label:<10}")), plain(value)])
+    };
+    let mut lines = vec![
         Line::from(bold(format!(" {} {}?", c.kind.verb(), c.action), WARNING)),
         blank(),
-        Line::from(muted(" Workload:")),
-        Line::from(format!(" {}", c.workload)),
-        blank(),
-        Line::from(muted(" Action:")),
-        Line::from(format!(" {}", c.action)),
-        blank(),
-        Line::from(span(" [Enter] Confirm   [Esc] Cancel", ACCENT)),
+        row("Incident", format!("{}  {}", c.incident_id, c.category)),
+        row("Workload", c.workload.clone()),
     ];
-    f.render_widget(Paragraph::new(lines).block(modal_block("Confirm", theme::BORDER_FOCUSED)), rect);
+    if c.why.is_empty() {
+        lines.push(row("Why", "no RCA statement from the server".into()));
+    } else {
+        for (n, part) in wrap_words(&c.why, room).into_iter().enumerate() {
+            lines.push(row(if n == 0 { "Why" } else { "" }, part));
+        }
+    }
+    let effect = match (c.kind, c.action.as_str()) {
+        (ActionKind::Reject, _) => "No action is taken on the workload; the proposal is closed.".to_string(),
+        (ActionKind::Approve, "restart_workload") => {
+            "Restarts the workload: inference is unavailable until it recovers. There is no rollback.".to_string()
+        }
+        (ActionKind::Approve, _) => "The server executes the proposed action.".to_string(),
+    };
+    for (n, part) in wrap_words(&effect, room).into_iter().enumerate() {
+        lines.push(row(if n == 0 { "Effect" } else { "" }, part));
+    }
+    lines.push(blank());
+    let armed = app.now.saturating_duration_since(c.opened) >= CONFIRM_GUARD;
+    lines.push(Line::from(vec![
+        plain(" "),
+        if armed { span("[Enter] Confirm", ACCENT) } else { muted("[Enter] Confirm") },
+        span("   [Esc] Cancel", ACCENT),
+    ]));
+    let rect = centered(area, width, lines.len() as u16 + 2);
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Paragraph::new(lines).block(modal_block("Confirm", theme::BORDER_FOCUSED)),
+        rect,
+    );
 }
 
-fn busy_modal(f: &mut Frame, area: Rect, app: &App) {
+/// The approve/reject in flight, with the SERVER's current state for that incident. It never
+/// predicts: the state shown is whatever the last poll reported.
+fn progress_banner(f: &mut Frame, area: Rect, app: &App) {
     let Some(b) = &app.busy else { return };
-    let rect = centered(area, 64, 7);
-    f.render_widget(Clear, rect);
     let secs = app.now.saturating_duration_since(b.since).as_secs();
+    let server_state = match app.busy_incident() {
+        Some(i) => state_chip(&i.status),
+        None => muted("N/A"),
+    };
     let lines = vec![
-        Line::from(bold(" Waiting for the server…", WARNING)),
-        blank(),
-        Line::from(format!(" {} {} sent ({secs}s).", b.kind.verb(), b.incident_id)),
-        Line::from(muted(" Remediation and verification can take a minute or two.")),
-        Line::from(muted(" The server stays authoritative; this screen follows its state.")),
+        Line::from(vec![
+            plain(" "),
+            bold("Waiting for the server…", WARNING),
+            muted(format!("  {} {} sent ({secs}s)", b.kind.verb(), b.incident_id)),
+        ]),
+        Line::from(vec![
+            plain(" "),
+            muted("Server state  "),
+            server_state,
+            muted("   Remediation and verification can take a minute or two."),
+        ]),
+        hline(area.width as usize),
     ];
-    f.render_widget(Paragraph::new(lines).block(modal_block("In progress", WARNING)), rect);
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 // ---- system screens (read-only; every value is the server's) ----------------------------------
@@ -1191,7 +1244,7 @@ fn help(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(l).scroll((app.scroll, 0)), area);
 }
 
-fn stop_modal(f: &mut Frame, area: Rect) {
+fn stop_modal(f: &mut Frame, area: Rect, app: &App) {
     let rect = centered(area, 58, 10);
     f.render_widget(Clear, rect);
     let lines = vec![
@@ -1201,7 +1254,15 @@ fn stop_modal(f: &mut Frame, area: Rect) {
         Line::from(muted(" The control plane and its watchdog stop.")),
         Line::from(muted(" The managed workload is not touched.")),
         blank(),
-        Line::from(span(" [Enter] Stop   [Esc] Cancel", ACCENT)),
+        Line::from(vec![
+            plain(" "),
+            if app.now.saturating_duration_since(app.stop_opened) >= CONFIRM_GUARD {
+                span("[Enter] Stop", ACCENT)
+            } else {
+                muted("[Enter] Stop")
+            },
+            span("   [Esc] Cancel", ACCENT),
+        ]),
     ];
     f.render_widget(Paragraph::new(lines).block(modal_block("Confirm", theme::BORDER_FOCUSED)), rect);
 }

@@ -17,7 +17,8 @@ import urllib.request
 from pathlib import Path
 
 from aiops import lifecycle
-from aiops.profile import ProfileError, default_config_path, load_profile
+from aiops.default_profile import TEMPLATE
+from aiops.profile import ProfileError, default_config_path, load_profile, user_config_path
 
 STARTUP_TIMEOUT_SECONDS = 90      # doctor + watchdog arming (15s) + API bind, with headroom
 POLL_SECONDS = 0.2
@@ -141,11 +142,39 @@ def ensure_control_plane(config_path, out=print, spawn=spawn_start, ready=api_re
         sleep(POLL_SECONDS)
 
 
-def main(argv, out=print, tui_exec=None, ensure=None, isatty=None):
+def offer_default_config(out, ask, environ):
+    """First run: no config anywhere. Offer to write the default profile; never overwrite a file.
+
+    Returns the path to use, or None if the operator declined (nothing is created)."""
+    target = user_config_path(environ)
+    out(f"No aiops configuration found (looked for ./aiops.toml and {target}).\n"
+        f"Create {target} from the default profile?\n"
+        "  docker-real-gpu: an NVIDIA GPU, Docker, and one vLLM container you provision yourself "
+        "(aiops never creates it).")
+    try:
+        answer = ask("Create it? [Y/n] ").strip().lower()
+    except EOFError:
+        answer = "n"
+    if answer not in ("", "y", "yes"):
+        out("Nothing was created. Pass --config PATH, or create the file yourself "
+            "(examples: deploy/profiles/).")
+        return None
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(target, "x") as f:                  # "x": an existing file is never overwritten
+            f.write(TEMPLATE)
+    except FileExistsError:
+        pass
+    else:
+        out(f"Created {target}. Edit it to change the workload, ports or safety limits.")
+    return str(target)
+
+
+def main(argv, out=print, tui_exec=None, ensure=None, isatty=None, ask=input, environ=os.environ):
     import argparse
     from aiops.cli import TUI_BUILD, _tui_binary
     parser = argparse.ArgumentParser(prog="aiops")
-    parser.add_argument("--config", default=default_config_path(),
+    parser.add_argument("--config", default=default_config_path(environ),
                         help="runtime profile (TOML); default ./aiops.toml, else ~/.config/aiops/aiops.toml")
     args = parser.parse_args(argv)
 
@@ -158,7 +187,13 @@ def main(argv, out=print, tui_exec=None, ensure=None, isatty=None):
     if not binary.exists():                     # before starting anything: no point otherwise
         out(f"the operator TUI is not built ({binary}).\nBuild it once with: {TUI_BUILD}")
         return 1
-    code, url = (ensure or ensure_control_plane)(args.config, out=out)
+    config = args.config
+    explicit = any(a == "--config" or a.startswith("--config=") for a in argv)
+    if not explicit and not Path(config).exists():
+        config = offer_default_config(out, ask, environ)
+        if config is None:
+            return 2
+    code, url = (ensure or ensure_control_plane)(config, out=out)
     if code != 0:
         return code
     sys.stdout.flush()

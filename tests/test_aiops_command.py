@@ -30,12 +30,12 @@ def tui_bin():
 
 
 class Pty:
-    def __init__(self, argv, env, rows=40, cols=120):
+    def __init__(self, argv, env, rows=40, cols=120, cwd=ROOT):
         self.master, slave = pty.openpty()
         fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         self.vs = VScreen(rows, cols)
         self.proc = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave, env=env,
-                                     cwd=ROOT, close_fds=True, start_new_session=True)
+                                     cwd=cwd, close_fds=True, start_new_session=True)
         os.close(slave)
         self.raw = b""
 
@@ -123,3 +123,21 @@ def test_aiops_with_a_bad_configuration_is_an_error_not_a_tui(tmp_path, tui_bin)
         assert t.proc.wait(timeout=30) == 2
     finally:
         t.close()
+
+
+def test_first_run_in_a_real_terminal_asks_before_creating_a_config_and_declining_creates_nothing(
+        tmp_path, tui_bin):
+    work = tmp_path / "work"
+    work.mkdir()
+    env = {**env_for(tui_bin), "XDG_CONFIG_HOME": str(tmp_path / "xdg"), "HOME": str(tmp_path)}
+    t = Pty([str(ROOT / "bin" / "aiops")], env, cwd=work)
+    try:
+        assert t.wait_screen("No aiops configuration found")
+        assert t.wait_screen("Create it? [Y/n]")
+        t.send(b"n\r")
+        assert t.wait_screen("Nothing was created")
+        assert t.proc.wait(timeout=15) == 2
+        assert "INFERENCE AUTOPILOT" not in t.vs.text()            # no TUI, nothing started
+    finally:
+        t.close()
+    assert not (tmp_path / "xdg").exists()

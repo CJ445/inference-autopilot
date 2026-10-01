@@ -23,16 +23,21 @@ class ProfileError(Exception):
     pass
 
 
+def user_config_path(environ=os.environ):
+    """`~/.config/aiops/aiops.toml` (or under `$XDG_CONFIG_HOME`)."""
+    base = environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "aiops" / "aiops.toml"
+
+
 def default_config_path(environ=os.environ):
-    """`./aiops.toml` if it exists, else the user's `~/.config/aiops/aiops.toml` if that exists.
+    """`./aiops.toml` if it exists, else the user's config file if that exists.
 
     Otherwise `aiops.toml`, so the error names the file an operator would naturally create.
     `--config` always wins; nothing is searched anywhere else.
     """
     if Path("aiops.toml").exists():
         return "aiops.toml"
-    base = environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    user = Path(base) / "aiops" / "aiops.toml"
+    user = user_config_path(environ)
     return str(user) if user.exists() else "aiops.toml"
 
 

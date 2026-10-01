@@ -1,0 +1,50 @@
+"""The profile `aiops` offers to create on first run.
+
+An exact copy of `deploy/profiles/docker-real-gpu.toml` (a test keeps them identical), embedded so
+an installed `aiops` does not depend on the source checkout. The Kubernetes profile has no safe
+default (it needs a kubectl context), so it is never offered.
+"""
+TEMPLATE = """# Real NVIDIA GPU + real vLLM in a labeled Docker container (the first real-GPU profile).
+#
+# The control plane does NOT create, pull or own the vLLM container. It manages exactly the
+# container labeled  com.inference-autopilot.managed=true  and
+# com.inference-autopilot.workload=<[workload] name>. See PRD ADR-021 for a reference
+# `docker run` recipe. Relative paths resolve against this file's directory.
+profile = "docker-real-gpu"
+
+[control_plane]
+port = 8080                          # the local API binds to 127.0.0.1 only
+db = "aiops.db"
+state_file = "aiops.state.json"
+interval = 5
+
+[workload]
+name = "vllm"                        # the ONLY container this profile may touch
+vllm_url = "http://127.0.0.1:8001"   # loopback only
+model = "facebook/opt-125m"
+
+[gpu]
+index = 0
+# uuid = "GPU-..."                   # optional pin; doctor fails if it does not match
+# min_memory_mib = 6000              # optional expectation; doctor fails if the GPU is smaller
+
+[safety]
+gpu_memory_threshold_bytes = 4500000000   # memory-pressure detector threshold
+max_gpu_memory_percent = 85
+max_temperature_c = 80
+max_ram_percent = 90
+max_runtime_seconds = 86400          # watchdog budget: the control plane is terminated after this
+
+[verification]
+timeout = 150                        # seconds to observe real recovery before UNRESOLVED
+interval = 2
+stable_probes = 3                    # consecutive real completions required
+probe_interval = 1
+
+# The independent watchdog (a separate process armed by `aiops start`). It enforces the
+# [safety] budgets, reading this file itself; nothing at runtime can change them.
+[watchdog]
+interval = 1                         # seconds between safety samples
+term_grace_seconds = 20              # SIGTERM first; SIGKILL only if it is still alive after this
+max_sensor_failures = 3              # consecutive unreadable samples before failing closed
+"""

@@ -33,6 +33,20 @@ fn online(status: &str, incidents: Vec<Incident>) -> App {
 fn with_pending() -> App {
     online(UNRESPONSIVE, vec![incident(PENDING, "inc_001")])
 }
+/// On the incident's own page: the only place a decision can be started.
+fn reviewing() -> App {
+    let inc = incident(PENDING, "inc_001");
+    let mut snap = snapshot(UNRESPONSIVE, vec![inc.clone()]);
+    snap.detail = Some(inc);                         // the page has loaded the incident's detail
+    let mut app = App::new("http://127.0.0.1:8080".into());
+    app.apply(Msg::Poll(Ok(snap)));
+    app.handle_key(code(KeyCode::Enter));
+    app
+}
+/// Lets the confirmation's key-repeat guard elapse (the loop advances `now` in real use).
+fn settle(app: &mut App) {
+    app.now += Duration::from_millis(600);
+}
 
 #[test]
 fn a_new_app_has_no_data_and_is_connecting() {
@@ -154,7 +168,7 @@ fn tab_and_number_keys_switch_screens_and_audit_is_only_polled_on_its_screen() {
 
 #[test]
 fn pressing_a_opens_a_confirmation_and_performs_no_action() {
-    let mut app = with_pending();
+    let mut app = reviewing();
     let effects = app.handle_key(key('a'));
     assert!(effects.is_empty(), "approval must wait for confirmation");
     let c = app.confirm.as_ref().expect("a confirmation dialog");
@@ -165,8 +179,9 @@ fn pressing_a_opens_a_confirmation_and_performs_no_action() {
 
 #[test]
 fn enter_confirms_and_requests_exactly_one_approval() {
-    let mut app = with_pending();
+    let mut app = reviewing();
     app.handle_key(key('a'));
+    settle(&mut app);
     let effects = app.handle_key(code(KeyCode::Enter));
     assert_eq!(effects, vec![Effect::Approve("inc_001".into())]);
     assert!(app.confirm.is_none() && app.busy.is_some());
@@ -174,7 +189,7 @@ fn enter_confirms_and_requests_exactly_one_approval() {
 
 #[test]
 fn esc_cancels_the_confirmation_without_acting() {
-    let mut app = with_pending();
+    let mut app = reviewing();
     app.handle_key(key('a'));
     assert!(app.handle_key(code(KeyCode::Esc)).is_empty());
     assert!(app.confirm.is_none() && app.busy.is_none());
@@ -182,7 +197,7 @@ fn esc_cancels_the_confirmation_without_acting() {
 
 #[test]
 fn other_keys_cannot_confirm_or_switch_the_pending_action() {
-    let mut app = with_pending();
+    let mut app = reviewing();
     app.handle_key(key('a'));
     for k in [key('a'), key('r'), key('y'), key('s'), code(KeyCode::Down), code(KeyCode::Tab)] {
         assert!(app.handle_key(k).is_empty());
@@ -194,16 +209,18 @@ fn other_keys_cannot_confirm_or_switch_the_pending_action() {
 
 #[test]
 fn reject_requires_its_own_confirmation_and_calls_reject() {
-    let mut app = with_pending();
+    let mut app = reviewing();
     assert!(app.handle_key(key('r')).is_empty());
     assert!(matches!(app.confirm.as_ref().unwrap().kind, ActionKind::Reject));
+    settle(&mut app);
     assert_eq!(app.handle_key(code(KeyCode::Enter)), vec![Effect::Reject("inc_001".into())]);
 }
 
 #[test]
 fn a_second_action_cannot_start_while_one_is_in_flight() {
-    let mut app = with_pending();
+    let mut app = reviewing();
     app.handle_key(key('a'));
+    settle(&mut app);
     app.handle_key(code(KeyCode::Enter));
     assert!(app.handle_key(key('a')).is_empty() && app.confirm.is_none());
     assert!(app.handle_key(key('r')).is_empty() && app.confirm.is_none());
@@ -232,10 +249,10 @@ fn a_proposal_on_an_incident_that_is_not_awaiting_approval_is_not_actionable() {
 }
 
 #[test]
-fn approval_works_from_the_detail_screen_too() {
-    let mut app = with_pending();
-    app.handle_key(code(KeyCode::Enter));
+fn approval_is_decided_from_the_incident_page() {
+    let mut app = reviewing();
     app.handle_key(key('a'));
+    settle(&mut app);
     assert_eq!(app.handle_key(code(KeyCode::Enter)), vec![Effect::Approve("inc_001".into())]);
 }
 
@@ -395,8 +412,9 @@ fn time_never_runs_backwards_into_a_negative_age() {
 
 #[test]
 fn a_client_timeout_on_approve_is_not_reported_as_a_failure_and_is_never_retried() {
-    let mut app = with_pending();
+    let mut app = reviewing();
     app.handle_key(key('a'));
+    settle(&mut app);
     assert_eq!(app.handle_key(code(KeyCode::Enter)), vec![Effect::Approve("inc_001".into())]);
     app.apply(Msg::Action { kind: ActionKind::Approve, id: "inc_001".into(), result: Err(ApiError::Timeout) });
     let n = app.active_notice().expect("the operator is told");
@@ -405,4 +423,65 @@ fn a_client_timeout_on_approve_is_not_reported_as_a_failure_and_is_never_retried
     assert!(app.busy.is_none() && app.confirm.is_none());
     // nothing re-sends by itself: only a fresh A + Enter can, and the incident state decides if it is allowed
     assert!(app.handle_key(key('s')) == vec![Effect::RefreshNow]);
+}
+
+// --- review before deciding; the confirmation cannot be fat-fingered ------------------------------
+
+#[test]
+fn a_and_r_do_nothing_but_explain_on_the_list_screens() {
+    for screen_key in ['1', '2'] {
+        let mut app = with_pending();
+        app.handle_key(key(screen_key));
+        for k in ['a', 'r'] {
+            assert!(app.handle_key(key(k)).is_empty() && app.confirm.is_none());
+            let n = app.active_notice().expect("it says why");
+            assert!(n.text.contains("open the incident") && n.is_error, "{}", n.text);
+        }
+    }
+}
+
+#[test]
+fn the_confirmation_carries_the_incident_the_reason_and_the_workload() {
+    let app = {
+        let mut a = reviewing();
+        a.handle_key(key('a'));
+        a
+    };
+    let c = app.confirm.as_ref().unwrap();
+    assert_eq!(c.category, "INFERENCE_UNRESPONSIVE");
+    assert!(c.why.contains("Inference requests are failing or timing out"), "{}", c.why);
+    assert_eq!(c.workload, "vllm");
+}
+
+#[test]
+fn enter_is_ignored_until_the_confirmation_guard_has_elapsed() {
+    let mut app = reviewing();                       // Enter just opened this incident
+    app.handle_key(key('a'));
+    assert!(app.handle_key(code(KeyCode::Enter)).is_empty(), "a held or repeated Enter must not confirm");
+    assert!(app.confirm.is_some() && app.busy.is_none());
+    app.now += Duration::from_millis(200);
+    assert!(app.handle_key(code(KeyCode::Enter)).is_empty());
+    app.now += Duration::from_millis(400);           // 600 ms after it opened
+    assert_eq!(app.handle_key(code(KeyCode::Enter)), vec![Effect::Approve("inc_001".into())]);
+}
+
+#[test]
+fn esc_works_immediately_even_inside_the_guard() {
+    let mut app = reviewing();
+    app.handle_key(key('r'));
+    assert!(app.handle_key(code(KeyCode::Esc)).is_empty() && app.confirm.is_none());
+}
+
+#[test]
+fn a_decision_waits_for_the_incidents_details_to_load() {
+    let mut app = with_pending();                    // list data only: no RCA yet
+    app.handle_key(code(KeyCode::Enter));
+    assert!(app.handle_key(key('a')).is_empty() && app.confirm.is_none());
+    assert!(app.active_notice().unwrap().text.contains("still loading"));
+    let inc = incident(PENDING, "inc_001");
+    let mut snap = snapshot(UNRESPONSIVE, vec![inc.clone()]);
+    snap.detail = Some(inc);
+    app.apply(Msg::Poll(Ok(snap)));                  // the detail arrives on the next poll
+    app.handle_key(key('a'));
+    assert!(app.confirm.is_some());
 }

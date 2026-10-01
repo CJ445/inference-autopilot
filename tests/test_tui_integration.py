@@ -228,9 +228,12 @@ def test_approving_through_the_tui_goes_through_the_servers_policy_and_resolves(
     t = term(cp.url)
     assert t.wait_for("inc_001")
     t.send(b"\r")
-    assert t.wait_for("AWAITING APPROVAL")
+    assert t.wait_screen("Classification")           # the incident's detail (with its RCA) loaded
     t.send(b"a")
     assert t.wait_for("Approve restart_workload?")
+    t.send(b"\r")                                   # too soon: the key-repeat guard ignores it
+    time.sleep(0.8)
+    assert cp.world.restarts == 0
     t.send(b"\r")                                   # confirm
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline and cp.world.restarts == 0:
@@ -249,8 +252,11 @@ def test_approving_through_the_tui_goes_through_the_servers_policy_and_resolves(
 def test_rejecting_through_the_tui_asks_the_server_to_reject_and_restarts_nothing(term, cp):
     t = term(cp.url)
     assert t.wait_for("inc_001")
+    t.send(b"\r")                                   # review the incident first
+    assert t.wait_screen("Classification")
     t.send(b"r")
     assert t.wait_for("Reject restart_workload?")
+    time.sleep(0.8)
     t.send(b"\r")
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline and cp.api("/api/v1/incidents")["incidents"][0][
@@ -263,12 +269,15 @@ def test_rejecting_through_the_tui_asks_the_server_to_reject_and_restarts_nothin
 def test_a_server_refusal_is_shown_to_the_operator(term, cp):
     t = term(cp.url)
     assert t.wait_for("inc_001")
+    t.send(b"\r")
+    assert t.wait_screen("Classification")           # the incident's detail (with its RCA) loaded
     t.send(b"a")
     assert t.wait_for("Approve restart_workload?")
     # the incident is decided elsewhere before the operator confirms
     urllib.request.urlopen(urllib.request.Request(
         cp.url + "/api/v1/incidents/inc_001/remediation/reject", method="POST", data=b""), timeout=5)
     mark = t.mark()
+    time.sleep(0.8)
     t.send(b"\r")
     assert t.wait_for("POLICY_DENIED", since=mark)
     assert cp.world.restarts == 0
@@ -481,6 +490,7 @@ def test_stopping_the_control_plane_from_the_tui_needs_confirmation_and_asks_the
     assert not cp.stop_requested.is_set()              # Esc cancels
     t.send(b"x")
     assert t.wait_screen("Stop control plane?")
+    time.sleep(0.8)
     t.send(b"\r")
     assert cp.stop_requested.wait(10)                  # the SERVER was asked, through its API
     assert t.wait_screen("stop requested")
@@ -514,3 +524,51 @@ def test_the_tui_follows_the_workload_appearing_stopping_and_disappearing(term, 
         assert t.proc.wait(timeout=10) == 0
     finally:
         plane.stop()
+
+
+def test_real_arrow_key_escape_sequences_switch_screens_and_scroll(term, cp):
+    t = term(cp.url, rows=24, cols=100)
+    assert t.wait_screen("inc_001")
+    for seq in (b"\x1b[C", b"\x1bOC"):                 # → in normal and application cursor mode
+        t.send(seq)
+        t.pump(0.4)
+    assert t.wait_screen("Audit log")                  # Overview -> Incidents -> Audit
+    t.send(b"\x1b[D")                                  # ←
+    assert t.wait_screen("CATEGORY")                   # back on Incidents
+    t.send(b"\r")                                      # inspect, then scroll with ↓ / ↑
+    assert t.wait_screen("Evidence") and t.wait_screen("Classification")   # detail fully loaded
+    first = t.screen()
+    t.send(b"\x1b[B" * 8)
+    t.pump(0.6)
+    assert t.screen() != first
+    t.send(b"\x1b[A" * 8)
+    t.pump(0.6)
+    assert t.screen() == first
+
+
+def test_a_and_r_on_the_overview_explain_instead_of_deciding(term, cp):
+    t = term(cp.url)
+    assert t.wait_screen("inc_001")
+    t.send(b"a")
+    assert t.wait_screen("open the incident")
+    assert "Approve restart_workload?" not in t.screen()
+    time.sleep(0.6)
+    assert cp.world.restarts == 0
+
+
+def test_the_confirmation_shows_the_reason_and_the_effect_and_progress_is_inline(term, cp):
+    t = term(cp.url)
+    assert t.wait_screen("inc_001")
+    t.send(b"\r")
+    assert t.wait_screen("Classification")
+    t.send(b"a")
+    for needle in ["Approve restart_workload?", "Why", "exhausted available", "Effect",
+                   "no rollback", "[Enter] Confirm"]:
+        assert t.wait_screen(needle), needle
+    time.sleep(0.8)
+    t.send(b"\r")
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and cp.world.restarts == 0:
+        t.pump(0.1)
+    assert cp.world.restarts == 1
+    assert t.wait_screen("RESOLVED")

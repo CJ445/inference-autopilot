@@ -5,6 +5,7 @@ use aiops_tui::app::{App, ClientInfo, Command, Effect, Loaded, Msg, Screen, Snap
 use aiops_tui::model::{ConfigInfo, Diagnostics, Status, StopAck, VersionInfo};
 use aiops_tui::{theme, ui};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::time::Duration;
 
 const HEALTHY: &str = include_str!("fixtures/status_healthy.json");
 
@@ -192,6 +193,8 @@ fn stop_needs_x_then_an_explicit_enter_and_sends_exactly_one_request() {
     }
     assert!(a.handle_key(key('q')).is_empty(), "other keys cannot confirm or quit");
     assert!(a.handle_key(key('a')).is_empty());
+    assert!(a.handle_key(code(KeyCode::Enter)).is_empty(), "inside the guard Enter is ignored");
+    a.now += Duration::from_millis(600);
     assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Effect::StopControlPlane]);
     assert!(!a.stop_confirm);
     assert!(a.handle_key(code(KeyCode::Enter)).is_empty(), "Enter again sends nothing");
@@ -220,6 +223,7 @@ fn a_stop_timeout_is_not_a_failure_and_is_never_resent() {
     let mut a = app();
     a.handle_key(key('4'));
     a.handle_key(key('x'));
+    a.now += Duration::from_millis(600);
     assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Effect::StopControlPlane]);
     a.apply(Msg::Loaded(Loaded::Stop(Err(ApiError::Timeout))));
     let n = a.active_notice().unwrap();
@@ -309,6 +313,7 @@ fn the_palette_stop_command_only_opens_the_same_confirmation() {
     }
     assert!(a.handle_key(code(KeyCode::Enter)).is_empty());     // no request yet
     assert!(a.stop_confirm);
+    a.now += Duration::from_millis(600);
     assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Effect::StopControlPlane]);
 }
 
@@ -532,4 +537,46 @@ fn a_workload_in_its_start_period_shows_as_starting_not_unresponsive() {
     lacks(&s, "✗ UNRESPONSIVE");
     a.handle_key(key('4'));
     has(&screen(&a), "◔ starting");
+}
+
+#[test]
+fn left_and_right_move_through_the_sidebar_screens_and_wrap() {
+    use aiops_tui::app::SCREEN_ORDER;
+    let mut a = app();
+    for n in 1..SCREEN_ORDER.len() {
+        a.handle_key(code(KeyCode::Right));
+        assert_eq!(a.screen, SCREEN_ORDER[n]);
+    }
+    a.handle_key(code(KeyCode::Right));
+    assert_eq!(a.screen, SCREEN_ORDER[0], "wraps from the last screen to the first");
+    a.handle_key(code(KeyCode::Left));
+    assert_eq!(a.screen, SCREEN_ORDER[SCREEN_ORDER.len() - 1], "and back");
+    a.handle_key(code(KeyCode::Left));
+    assert_eq!(a.screen, SCREEN_ORDER[SCREEN_ORDER.len() - 2]);
+}
+
+#[test]
+fn left_and_right_load_what_the_new_screen_needs_and_are_ignored_in_overlays() {
+    let mut a = app();
+    for _ in 0..4 {
+        a.handle_key(code(KeyCode::Right)); // Incidents, Audit, Control Plane
+    }
+    assert!(matches!(a.screen, Screen::Settings));
+    assert_eq!(a.config.is_loading(), true, "arriving by arrow asks the server like any other way in");
+    a.handle_key(ctrl('p'));
+    assert!(a.handle_key(code(KeyCode::Left)).is_empty());
+    assert!(matches!(a.screen, Screen::Settings), "the palette keeps the arrows");
+}
+
+#[test]
+fn a_detail_view_steps_from_incidents() {
+    let inc: aiops_tui::model::Incident =
+        serde_json::from_str(include_str!("fixtures/incident_pending.json")).unwrap();
+    let st: Status = serde_json::from_str(HEALTHY).unwrap();
+    let mut a = App::new("http://127.0.0.1:8080".into());
+    a.apply(Msg::Poll(Ok(Snapshot::new(st, vec![inc]))));
+    a.handle_key(code(KeyCode::Enter));
+    assert!(matches!(a.screen, Screen::Detail(_)));
+    a.handle_key(code(KeyCode::Right));
+    assert!(matches!(a.screen, Screen::Audit));
 }

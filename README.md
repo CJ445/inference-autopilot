@@ -63,14 +63,15 @@ The Rust binary is **not** the `aiops` command and `cargo install` is not the in
 ### 4. Configure
 
 `aiops` reads a runtime profile: `--config PATH`, else `./aiops.toml`, else
-`~/.config/aiops/aiops.toml`. So a one-time setup lets you run `aiops` from any directory:
-
-    mkdir -p ~/.config/aiops
-    cp deploy/profiles/docker-real-gpu.toml ~/.config/aiops/aiops.toml
+`~/.config/aiops/aiops.toml`. **On first run, if none exists, `aiops` offers to create
+`~/.config/aiops/aiops.toml` from the default profile** (docker-real-gpu: an NVIDIA GPU, Docker
+and one vLLM container you provision yourself). It asks first, never overwrites an existing file,
+and never offers when you passed `--config`. The Kubernetes profile has no safe default (it needs a
+kubectl context), so copy it from `deploy/profiles/` yourself.
 
 Relative paths in a profile (`db`, `state_file`) resolve next to the profile file, so the state
-and the startup log live in `~/.config/aiops/`. Other examples are in `deploy/profiles/`. A
-profile names exactly one managed workload; unknown keys are errors.
+and the startup log live in `~/.config/aiops/`. A profile names exactly one managed workload;
+unknown keys are errors.
 
 ### 5. The vLLM container (optional, operator-controlled)
 
@@ -119,8 +120,14 @@ That is the normal way in. It looks for a running control plane for the profile:
 Quitting the TUI (`Q`) leaves the control plane running. To stop it, use the TUI's *Control
 Plane* screen (`4`, then `X`, then Enter) or, from a shell, `aiops stop`.
 
+Deciding an incident: open it (`Enter`) and read its evidence; `A` (approve) or `R` (reject) work
+only on that page, and only once the incident's details have loaded. The confirmation shows the
+incident, the server's reason, and the effect (a restart interrupts inference and has no
+rollback); `Enter` is ignored for the first half second so a held key cannot confirm it. While the
+server executes and verifies, an inline banner shows the server's current state for that incident.
+
 Inside the TUI: `Ctrl+P` opens the command palette; `?` opens Help. Screens: Overview,
-Incidents, Audit, Control Plane, Settings, Diagnostics, About, Help (`1`–`7`, `?`, or `Tab`).
+Incidents, Audit, Control Plane, Settings, Diagnostics, About, Help (`←`/`→`, `Tab`, `1`–`7` or `?`).
 Settings and Diagnostics are read-only views of what the server reports (the validated active
 configuration; the same checks as `aiops doctor`). Restarting the control plane is not done from
 the TUI; run `aiops` again after a stop.

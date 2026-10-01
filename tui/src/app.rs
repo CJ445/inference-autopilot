@@ -162,17 +162,18 @@ pub struct ClientInfo {
 }
 
 /// The keys that do something, in the order Help lists them. `tests/help.rs` drives every row.
-pub const KEYMAP: [(&str, &str); 14] = [
+pub const KEYMAP: [(&str, &str); 15] = [
     ("↑ ↓", "Navigate / scroll"),
     ("Enter", "Inspect the selected incident"),
     ("Esc", "Back / cancel / close"),
-    ("Tab", "Next screen"),
+    ("Tab →", "Next screen"),
+    ("←", "Previous screen"),
     ("1-7", "Jump to a screen (Overview … About)"),
     ("?", "Help"),
     ("Ctrl+P", "Command palette"),
     ("S", "Refresh now"),
-    ("A", "Approve (incident awaiting a decision)"),
-    ("R", "Reject (incident awaiting a decision)"),
+    ("A", "Approve (on an incident's page, once it awaits a decision)"),
+    ("R", "Reject (on an incident's page, once it awaits a decision)"),
     ("D", "Run diagnostics again (Diagnostics screen)"),
     ("X", "Stop the control plane (Control Plane screen)"),
     ("Q", "Quit (the control plane keeps running)"),
@@ -200,7 +201,15 @@ pub struct Confirm {
     pub incident_id: String,
     pub action: String,
     pub workload: String,
+    pub category: String,
+    /// The server's RCA statement (empty if it sent none): why this action is proposed.
+    pub why: String,
+    pub opened: Instant,
 }
+
+/// Enter is ignored for this long after a confirmation opens, so a held or double-tapped Enter
+/// (the key that opened the incident) cannot confirm an action nobody read.
+pub const CONFIRM_GUARD: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone)]
 pub struct Busy {
@@ -276,6 +285,7 @@ pub struct App {
     pub diag: Remote<Diagnostics>,
     pub palette: Option<Palette>,
     pub stop_confirm: bool,
+    pub stop_opened: Instant,
     pub stop_sent: Option<Instant>,
     pub now: Instant,
     pub wall: f64,
@@ -309,6 +319,7 @@ impl App {
             diag: Remote::Idle,
             palette: None,
             stop_confirm: false,
+            stop_opened: Instant::now(),
             stop_sent: None,
             now: Instant::now(),
             wall: wall_clock(),
@@ -333,6 +344,14 @@ impl App {
                 .or_else(|| s.incidents.iter().find(|i| &i.incident_id == id));
         }
         self.rows().get(self.selected).copied()
+    }
+
+    /// The incident an approve/reject in flight is about, as the server last reported it.
+    pub fn busy_incident(&self) -> Option<&Incident> {
+        let id = &self.busy.as_ref()?.incident_id;
+        let s = self.snapshot.as_ref()?;
+        s.detail.as_ref().filter(|d| &d.incident_id == id)
+            .or_else(|| s.incidents.iter().find(|i| &i.incident_id == id))
     }
 
     pub fn is_stale(&self) -> bool {
@@ -384,6 +403,7 @@ impl App {
         if let Some(c) = self.confirm.clone() {
             // While a confirmation is open ONLY Enter (do it) or Esc (don't) mean anything.
             match key.code {
+                KeyCode::Enter if self.now.saturating_duration_since(c.opened) < CONFIRM_GUARD => {}
                 KeyCode::Enter => {
                     self.confirm = None;
                     self.busy = Some(Busy { kind: c.kind, incident_id: c.incident_id.clone(), since: self.now });
@@ -399,6 +419,7 @@ impl App {
         }
         if self.stop_confirm {
             match key.code {
+                KeyCode::Enter if self.now.saturating_duration_since(self.stop_opened) < CONFIRM_GUARD => {}
                 KeyCode::Enter => {
                     self.stop_confirm = false;
                     self.stop_sent = Some(self.now);
@@ -423,14 +444,8 @@ impl App {
         match key.code {
             KeyCode::Char('q') | KeyCode::Char('Q') => return vec![Effect::Quit],
             KeyCode::Char('s') | KeyCode::Char('S') => return vec![Effect::RefreshNow],
-            KeyCode::Tab => {
-                let here = match &self.screen {
-                    Screen::Detail(_) => &Screen::Incidents,
-                    other => other,
-                };
-                let at = SCREEN_ORDER.iter().position(|s| s == here).unwrap_or(0);
-                fx = self.go(SCREEN_ORDER[(at + 1) % SCREEN_ORDER.len()].clone());
-            }
+            KeyCode::Tab | KeyCode::Right => fx = self.cycle(1),
+            KeyCode::Left => fx = self.cycle(-1),
             KeyCode::Char(c @ '1'..='7') => {
                 fx = self.go(SCREEN_ORDER[c as usize - '1' as usize].clone());
             }
@@ -467,6 +482,17 @@ impl App {
             _ => {}
         }
         fx
+    }
+
+    /// The next (`1`) or previous (`-1`) sidebar screen, wrapping; a detail view counts as Incidents.
+    fn cycle(&mut self, delta: isize) -> Vec<Effect> {
+        let here = match &self.screen {
+            Screen::Detail(_) => &Screen::Incidents,
+            other => other,
+        };
+        let n = SCREEN_ORDER.len() as isize;
+        let at = SCREEN_ORDER.iter().position(|s| s == here).unwrap_or(0) as isize;
+        self.go(SCREEN_ORDER[(at + delta).rem_euclid(n) as usize].clone())
     }
 
     fn palette_key(&mut self, key: KeyEvent) -> Vec<Effect> {
@@ -580,6 +606,7 @@ impl App {
             return self.say("control plane unreachable: there is nothing to stop", true);
         }
         self.stop_confirm = true;
+        self.stop_opened = self.now;
     }
 
     /// Opens a confirmation. Nothing is sent until the operator presses Enter on it.
@@ -589,6 +616,14 @@ impl App {
         }
         if !matches!(self.conn, Conn::Online) {
             return self.say("control plane unreachable: nothing can be approved or rejected", true);
+        }
+        let Screen::Detail(id) = &self.screen else {
+            return self.say("open the incident (Enter) and review its evidence before deciding", true);
+        };
+        // The list does not carry the RCA; only the detail does. A decision needs the reason on screen.
+        let loaded = self.snapshot.as_ref().and_then(|s| s.detail.as_ref()).is_some_and(|d| &d.incident_id == id);
+        if !loaded {
+            return self.say("still loading this incident's details; try again in a moment", true);
         }
         let Some(incident) = self.selected_incident() else {
             return self.say("no incident selected", true);
@@ -606,6 +641,14 @@ impl App {
                 .and_then(|v| v.as_str())
                 .unwrap_or("N/A")
                 .to_string(),
+            category: incident.category.clone(),
+            why: incident
+                .rca
+                .as_ref()
+                .and_then(|r| r.root_cause.as_ref())
+                .map(|c| c.statement.clone())
+                .unwrap_or_default(),
+            opened: self.now,
         };
         self.confirm = Some(confirm);
     }
