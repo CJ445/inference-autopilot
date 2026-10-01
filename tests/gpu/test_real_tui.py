@@ -40,6 +40,7 @@ def test_the_operator_tui_drives_a_real_remediation_end_to_end(vllm, tmp_path, t
     provider = DockerProvider("vllm")
     with ControlPlane(tmp_path) as c:
         c.start()
+        port = c.port
         id_before = provider.get_workload("vllm")["id"]
         used, total, temp = smi("memory.used,memory.total,temperature.gpu")
         uuid = subprocess.run(["nvidia-smi", "--query-gpu=uuid", "--format=csv,noheader"],
@@ -49,9 +50,9 @@ def test_the_operator_tui_drives_a_real_remediation_end_to_end(vllm, tmp_path, t
             # -- healthy: real GPU, real vLLM, real safety state, all from the API -------------
             assert t.wait_screen("● CONTROL ONLINE", timeout=30)
             # the default view is plain, from the same real telemetry ...
-            for needle in ["Everything is working", "Answering ·", "% memory used", "Nothing right now"]:
+            for needle in ["✓ HEALTHY", "Probe", "Memory", "% of", "✓ WATCHING", "No active incidents."]:
                 assert t.wait_screen(needle, timeout=20), needle
-            assert "Probe" not in t.vs.text() and "VRAM" not in t.vs.text()
+            assert "Metrics" not in t.vs.text() and "VRAM" not in t.vs.text()
             t.send(b"d")                                   # ... D shows the technical view for the rest
             for needle in ["docker-real-gpu", "GPU 0", uuid[:12], "VRAM", "GiB", "● HEALTHY",
                            "Probe ✓", "Metrics ✓", "No active incidents", "● ARMED",
@@ -86,8 +87,8 @@ def test_the_operator_tui_drives_a_real_remediation_end_to_end(vllm, tmp_path, t
             # -- approve THROUGH THE TUI: a confirmation first, then exactly one server action ----
             mark = t.mark()
             t.send(b"a")
-            assert t.wait_screen("Approve: Restart the model server?")
-            assert t.wait_screen("[Enter] Confirm")
+            assert t.wait_screen("RECOVERY REQUEST")
+            assert t.wait_screen("[Enter] Approve")
             time.sleep(1.5)
             assert provider.get_workload("vllm")["id"] == id_before     # the dialog did nothing
             mark = t.mark()
@@ -144,4 +145,5 @@ def test_the_operator_tui_drives_a_real_remediation_end_to_end(vllm, tmp_path, t
         assert c.stop().returncode == 0 and c.proc.wait(timeout=30) == 0
         assert not c.wd_state.exists() and not c.state.exists()
         assert c.stray() == []
-    assert processes("aiops-tui") == []
+    # only the TUI THIS test started (its own port): an operator may have their own running elsewhere
+    assert processes("aiops-tui", f"http://127.0.0.1:{port}") == []

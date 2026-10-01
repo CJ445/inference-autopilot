@@ -135,3 +135,19 @@ def test_the_api_tells_the_operator_the_problem_is_gone(tmp_path):
     finally:
         srv.shutdown()
     assert w.restarts == 0
+
+
+def test_the_operator_ui_recognises_this_exact_refusal():
+    """The TUI shows 'RECOVERY NO LONGER NEEDED' when the server's refusal contains
+    `REFUSED_STALE` (tui/src/app.rs). The API has no dedicated error code for it, so the text is the
+    contract: if either side changes it, this fails instead of the dialog silently never appearing."""
+    import re
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "tui" / "src" / "app.rs").read_text()
+    pinned = re.search(r'pub const REFUSED_STALE: &str = "([^"]+)";', src).group(1)
+    api = (Path(__file__).resolve().parent.parent / "aiops" / "api.py").read_text()
+    message = re.search(r'except ConditionGone:\s+return self\._error\(409, "POLICY_DENIED",\s+"([^"]+)"', api).group(1)
+    assert pinned in message, (pinned, message)
+    # and the other 409 refusals must NOT match, or they would show the wrong dialog
+    for other in ("No pending remediation for this incident.", "Another remediation holds this workload."):
+        assert pinned not in other

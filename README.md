@@ -119,9 +119,9 @@ That is the normal way in. It looks for a running control plane for the profile:
   the last lines of its output and exits non-zero. The TUI is not opened over a broken start.
 
 Quitting the TUI (`Q`) leaves the control plane running. To stop it, use the TUI's *System* area
-(`4`, then `X`, then Enter) or, from a shell, `aiops stop`.
+(`5`, then `X`, then Enter) or, from a shell, `aiops stop`.
 
-What you see first is plain language: "Everything is working", "Your model stopped answering",
+What you see first is plain language: "✓ HEALTHY", "✓ WATCHING", "Your model stopped answering",
 "Needs your OK". Press **`D`** for the technical view of the same screen (exact incident categories,
 raw states, evidence sources, probe results, GPU and vLLM metrics, audit hashes); `D` again goes
 back. `aiops-tui --once --details` prints that technical frame for scripts. The header always says
@@ -130,15 +130,35 @@ which world you are in: `LIVE · GPU-REAL` (a real GPU reading is present), `LIV
 Deciding an incident: open it (`Enter`). The page reads *What happened*, *What we found*,
 *Recommended action* and *Recovery check*; `A` (approve) or `R` (reject) work only on that page, and
 only once the incident's details have loaded (until then it says "Loading the full details…"). The
-confirmation shows the incident, the server's reason, and the effect (a restart interrupts inference
-and has no rollback); `Enter` is ignored for the first half second so a held key cannot confirm it.
-While the server executes and verifies, an inline banner shows the server's current state.
+request that opens explains itself: the problem, the server's reason, the evidence, the proposed
+action, and that the action is allowlisted and runs only after you approve; a restart interrupts
+inference and has no rollback. It is two steps on purpose: `A` or `R` opens it, `Enter` confirms
+exactly that action (ignored for the first half second so a held key cannot confirm it), `Esc`
+cancels. While the server executes and verifies, an inline banner shows the server's current state.
+If the problem has already gone by the time you confirm, the server refuses, nothing is restarted,
+and a dialog says "RECOVERY NO LONGER NEEDED".
 
-Inside the TUI: `Ctrl+P` opens the command palette; `?` opens Help. Four areas (`←`/`→`, `Tab`,
-or `1`–`4`): **Overview**, **Incidents**, **Activity** (what the system did and decided) and
-**System** (the control plane and its stop, the same checks as `aiops doctor`, the validated active
-configuration, and About; all read-only except the confirmed stop). Restarting the control plane is
-not done from the TUI; run `aiops` again after a stop.
+Inside the TUI: `Ctrl+P` opens the command palette; `?` opens Help. Five areas in a strip under the
+header (`←`/`→`, `Tab`, or `1`–`5`):
+
+| Area | What it is for |
+|---|---|
+| **1 Home** | What is running, is it healthy, is Autopilot watching, and what you can do next |
+| **2 Incidents** | What happened, why, what Autopilot proposes, and what needs your OK |
+| **3 Lab** | Experience and verify the loop: a safe recovery test, or (when offered) a real fault |
+| **4 Activity** | What the system did and decided, in order |
+| **5 System** | The control plane and its stop, the same checks as `aiops doctor`, the validated active configuration, and About; all read-only except the confirmed stop |
+
+The same seven-stage loop is drawn on Home, the incident page and the Lab, one glyph and one word
+per stage (`✓` done, `→` here now, `✗` failed, `○` not run, `–` not applicable):
+`Observe › Detect › Diagnose › Propose › Approve › Recover › Verify`. It is derived from the incident
+status the server reports; a stage is never shown as done before the server says it happened.
+
+A few keys mean something different on the incident page than elsewhere, because only the incident
+page can decide: there `A` approves and `R` rejects; elsewhere `R` runs a recovery test, `A` opens
+Activity, `F` opens the real-fault dialog (Home and Lab only) and `I` opens Incidents. The footer
+always lists only the keys that work on the screen you are on. Restarting the control plane is not
+done from the TUI; run `aiops` again after a stop.
 
 The explicit commands remain for scripts and debugging:
 
@@ -150,15 +170,20 @@ The explicit commands remain for scripts and debugging:
 
 ## Try the failure loop safely (SIMULATION)
 
-In the TUI: press **`P`** (or `Ctrl+P` then "Practice an incident"). A persistent amber banner,
-`PRACTICE · SIMULATION`, appears on every screen, and the Overview tells you what to do next from
-the stage the server reports: **`F`** breaks the (simulated) model, the detector opens an incident
-after two failed checks in a row, you open it (`Enter`), review it and approve (`A`), a simulated
-restart runs, and the production verifier judges recovery from the simulated state. `P` practices
-again; `Esc` on the Overview leaves practice and returns to the real system. The confirmation says
-"A simulated restart: nothing real is restarted." The real system, its incidents, its watchdog and
-its workload are never touched, and nothing from the practice is ever shown as real (or the
-reverse): the practice has its own routes (`/api/v1/practice/...`), its own engine, store and lock,
+In the TUI: press **`R`** on Home (or open the **Lab**, `3`, or `Ctrl+P` then "Run a recovery test").
+One key runs the whole test: a fresh simulated session starts, and as soon as the server reports the
+simulated model healthy the TUI asks it to break the model. A persistent amber banner,
+`RECOVERY TEST · SIMULATION`, appears on every screen, and the header badge says `SIMULATION`.
+
+The Lab then tells the story as the server reports it, step by step, with the server's own
+timestamps: *Test started*, *Fault injected*, *Detected* (the detector needs the problem on
+consecutive checks), *Diagnosis*, *Recovery proposed* (with the evidence and why it needs your OK),
+*You approved*, *Recovered*, *Verified* (with the recorded checks) and *INCIDENT RESOLVED*. Press
+`Enter` to review and decide on the incident page, then `Esc` to come back to the finished story.
+`R` runs it again; `Esc` in the Lab (or on Home) leaves the test and returns to the real system.
+The request says "A simulated restart: nothing real is restarted." The real system, its incidents,
+its watchdog and its workload are never touched, and nothing from the test is ever shown as real (or
+the reverse): the test has its own routes (`/api/v1/practice/...`), its own engine, store and lock,
 and the TUI discards any poll that belongs to the other one.
 
 From the command line, without the TUI:
@@ -192,7 +217,7 @@ This is the project's official end-to-end demonstration on real hardware. It use
 vLLM and your real approval; nothing is simulated. It needs the setup above (`aiops doctor` clean
 and the labelled vLLM container running and healthy).
 
-1. In one terminal run `aiops` and stay on the Overview (everything healthy).
+1. In one terminal run `aiops` and stay on Home (everything healthy).
 2. In another terminal pause the workload (a bounded, reversible fault):
 
         docker pause aiops-vllm          # use your container's name
@@ -234,13 +259,17 @@ For testing the real loop without typing `docker pause` yourself, the TUI can pa
 workload for a bounded time. It is a testing tool, never part of normal operation, and it can only
 do one thing.
 
-In the TUI: `Ctrl+P`, then **"Break the real workload (pause)…"**. There is deliberately no plain
-key for it. A dialog says exactly what will happen (`LIVE · GPU-REAL`: the workload stops answering
-until it is automatically resumed in 2 minutes, or the recovery flow restarts it) and nothing is
-sent until you press `Enter` (ignored for the first half second). While the fault is active a red
-banner on every screen shows the time left; `Ctrl+P`, then **"Resume the workload now"** ends it
-sooner. It is not offered while practicing, while a fault is already active, or on a control plane
-without the Docker provider.
+In the TUI: the **Lab** (`3`) lists it under *Real infrastructure* ("affects the running workload"),
+and `F` on Home or the Lab (or `Ctrl+P`, then **"Inject a real fault (pause the workload)…"**) opens
+a dialog. `F` works only on those two screens, so a stray key elsewhere does nothing, and it only
+opens the dialog: nothing is sent until you press `Enter` (ignored for the first half second).
+The dialog says what will happen (`LIVE · GPU-REAL`: the managed workload stops answering for up to
+2 minutes, then resumes by itself), the expected flow, and the safety mechanisms (checked
+identity, a lease saved before anything is paused, an automatic timer, and a separate process that
+resumes it even if this one dies). While the fault is active a red banner on every screen shows the
+time left, and the Lab shows the fault and the loop it triggers; `Ctrl+P`, then **"Resume the
+workload now"** ends it sooner. It is not offered during a recovery test, while a fault is already
+active, or on a control plane without the Docker provider (the Lab says why).
 
 What makes it safe (ADR-031, DECISIONS.md D-12):
 
@@ -310,7 +339,7 @@ What the system does and does not do, and where each claim is enforced and teste
 
 It runs the *production* engine, detector, deterministic RCA, policy, approval and verifier over a
 synthetic world, so the control-loop semantics are the real ones, deterministic and runnable
-anywhere (`aiops demo`, Practice in the TUI, and the portable CI suites). It cannot tell you that
+anywhere (`aiops demo`, the recovery test in the TUI, and the portable CI suites). It cannot tell you that
 your GPU, your driver, Docker, vLLM or your network behave: the restart changes a synthetic
 lifecycle identity, not a process. It is one scenario (an unresponsive model). Real behaviour is
 shown only by the real golden scenario above, on a machine that has the hardware.

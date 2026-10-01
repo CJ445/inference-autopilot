@@ -129,10 +129,22 @@ fn highlighted(mut spans: Vec<Span<'static>>, width: usize) -> Line<'static> {
     Line::from(spans.into_iter().map(|s| Span::styled(s.content, s.style.patch(bg))).collect::<Vec<_>>())
 }
 
+/// `31s`, `4m`, `7h`: a long age is read, not counted in seconds.
+fn human_age(secs: f64) -> String {
+    let s = secs.max(0.0);
+    if s < 90.0 {
+        format!("{s:.0}s")
+    } else if s < 5400.0 {
+        format!("{:.0}m", s / 60.0)
+    } else {
+        format!("{:.0}h", s / 3600.0)
+    }
+}
+
 /// The values on screen are old: say so in words, at full contrast (dimming made them unreadable).
 fn stale_line(app: &App) -> Option<Line<'static>> {
     let age = if app.is_stale() { app.data_age().map(|d| d.as_secs() as f64) } else if app.telemetry_stale() { app.telemetry_age_secs() } else { None }?;
-    Some(Line::from(vec![plain(" "), bold(format!("Stale · last values observed {age:.0}s ago"), WARNING)]))
+    Some(Line::from(vec![plain(" "), bold(format!("Stale · last values observed {} ago", human_age(age)), WARNING)]))
 }
 
 fn state_chip(status: &str) -> Span<'static> {
@@ -281,11 +293,11 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
     if let Some(s) = &app.snapshot {
         if app.is_stale() {
             let age = app.data_age().map_or(0, |d| d.as_secs());
-            chips.push(vec![bold(format!("STALE {age}s"), WARNING)]);
+            chips.push(vec![bold(format!("STALE {}", human_age(age as f64)), WARNING)]);
         }
         let real = s.status.mode.as_deref() != Some("SIMULATION");
         if real && app.telemetry_stale() {
-            chips.push(vec![span(format!("telemetry stale ({:.0}s)", app.telemetry_age_secs().unwrap_or(0.0)), WARNING)]);
+            chips.push(vec![span(format!("telemetry stale ({})", human_age(app.telemetry_age_secs().unwrap_or(0.0))), WARNING)]);
         }
         if real && s.poll_ms > 1500 {
             chips.push(vec![span(format!("SLOW API ({:.1}s)", s.poll_ms as f64 / 1000.0), WARNING)]);
@@ -373,7 +385,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
                 }
                 Screen::Help => hints.push(("Esc", "Back", true, 6)),
                 screen => {
-                    if matches!(screen, Screen::Dashboard | Screen::Incidents | Screen::Lab) {
+                    if matches!(screen, Screen::Dashboard | Screen::Incidents | Screen::Lab) && !app.rows().is_empty() {
                         hints.push(("Enter", "Review", true, 6));
                     }
                     if matches!(screen, Screen::Incidents | Screen::Audit) {
@@ -1688,8 +1700,10 @@ fn pstage_style(st: PStage) -> (Color, Modifier) {
 /// `✓ Observe › ✓ Detect › → Approve › ○ Recover …`: a glyph and a word per stage (never colour
 /// alone). On a narrow pane it falls back to the glyphs and the name of the stage the loop is on.
 fn pipeline_line(stages: &[PStage; 7], w: usize) -> Line<'static> {
-    let full: usize = pipeline::NAMES.iter().map(|n| n.len() + 2).sum::<usize>() + 3 * 6 + 2;
-    let mut spans = vec![plain(" ")];
+    // exactly as wide as the seven stages need; the leading space goes first when the pane is tight,
+    // so that an 80-column terminal (the common one) still gets the full words
+    let full: usize = pipeline::NAMES.iter().map(|n| n.len() + 2).sum::<usize>() + 3 * 6;
+    let mut spans = if w > full { vec![plain(" ")] } else { Vec::new() };
     if w >= full {
         for (n, (name, st)) in pipeline::NAMES.iter().zip(stages).enumerate() {
             if n > 0 {
@@ -1768,9 +1782,11 @@ fn home(f: &mut Frame, area: Rect, app: &App) {
     }
     let w = area.width as usize;
     let mut l = vec![blank()];
-    if let Some(line) = stale_line(app) {
-        l.push(line);
-        l.push(blank());
+    if matches!(app.conn, Conn::Offline { .. }) {
+        if let Some(line) = stale_line(app) {
+            l.push(line);                       // the values below are the last known ones
+            l.push(blank());
+        }
     }
     if app.practice {
         l.extend(practice_guide(app));
@@ -1854,7 +1870,7 @@ fn autopilot_lines(app: &App, w: usize) -> Vec<Line<'static>> {
         return l;
     }
     let rows = app.rows();
-    let age = app.telemetry_age_secs().map(|a| format!("Last observation {a:.0}s ago"));
+    let age = app.telemetry_age_secs().map(|a| format!("Last observation {} ago", human_age(a)));
     let mut head = vec![plain(" "), bold("✓ WATCHING", HEALTHY)];
     if app.telemetry_stale() || app.is_stale() {
         head = vec![plain(" "), bold("! WATCHING, BUT THE DATA IS OLD", WARNING)];

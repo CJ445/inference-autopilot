@@ -40,19 +40,18 @@ def test_practice_on_the_real_machine_touches_nothing_real(tmp_path, tui_bin):
     with ControlPlane(tmp_path) as c:
         t = Pty([AIOPS, "--config", str(c.cfg)], env_for(tui_bin), rows=40, cols=132)
         try:
-            assert t.wait_screen("No workload connected", timeout=120)  # the real, empty system
-            assert t.wait_screen("P  Practice an incident")
+            assert t.wait_screen("NO WORKLOAD CONNECTED", timeout=120)  # the real, empty system
+            assert t.wait_screen("[R] Run a recovery test")
             t.send(b"d")                                               # the technical view for the rest
-            assert t.wait_screen("○ NO WORKLOAD") and t.wait_screen("Press P to practice an incident")
+            assert t.wait_screen("○ NO WORKLOAD") and t.wait_screen("Press R to run a recovery test")
             real = http(c.port, "/api/v1/status")
             assert real["mode"] == "REAL" and real["workload"]["state"] == "absent"
             pid = lifecycle.read_state(c.state)["pid"]
 
-            t.send(b"p")                                                # -- practice ---------------
-            assert t.wait_screen("PRACTICE · SIMULATION") and t.wait_screen("Press F to break the model")
+            t.send(b"r")                                                # -- one key: the recovery test -
+            assert t.wait_screen("RECOVERY TEST · SIMULATION") and t.wait_screen("Test started")
             assert "NO WORKLOAD" not in t.vs.text()                     # no real data under the banner
-            t.send(b"f")
-            assert t.wait_screen("Open the incident (Enter), review it, then approve (A).", timeout=30)
+            assert t.wait_screen("Needs your OK", timeout=30)           # the fault followed by itself
             t.send(b"\r")
             assert t.wait_screen("Classification")
             t.send(b"a")

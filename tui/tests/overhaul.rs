@@ -102,6 +102,8 @@ fn the_pipeline_follows_the_servers_status_and_never_runs_ahead_of_it() {
 fn every_stage_is_a_glyph_and_a_word_and_a_narrow_pane_still_names_where_it_is() {
     let wide = screen(&real(vec![incident(PENDING)]));
     has(&wide, "✓ Observe › ✓ Detect › ✓ Diagnose › ✓ Propose › → Approve › ○ Recover › ○ Verify");
+    let eighty = ui::render_to_string(&real(vec![incident(PENDING)]), 80, 24);
+    has(&eighty, "✓ Observe › ✓ Detect › ✓ Diagnose › ✓ Propose › → Approve › ○ Recover › ○ Verify");   // the common 80 columns
     let narrow = ui::render_to_string(&real(vec![incident(PENDING)]), 72, 30);
     has(&narrow, "✓ ✓ ✓ ✓ → ○ ○  Approve");                      // glyphs, and the stage the loop is on
     // failed and skipped stages are words too
@@ -509,6 +511,9 @@ fn the_footer_lists_only_the_keys_that_work_on_the_screen() {
         has(&home, k);
     }
     lacks(&home, "Approve");
+    lacks(&home, "Review");                                  // nothing to review: the hint is not offered
+    let with_incident = foot(&real(vec![incident(PENDING)]));
+    has(&with_incident, "Enter Review");
     let mut detail = real(vec![incident(PENDING)]);
     detail.handle_key(code(KeyCode::Enter));
     let d = foot(&detail);

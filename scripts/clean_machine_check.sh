@@ -58,7 +58,8 @@ step "6. nothing was left behind: no state, PID, socket, simulation or fault-lea
 left="$(find "$HOME" "$work/cwd" -type f \( -name '*.state.json*' -o -name '*.pid' -o -name '*.sock' \
         -o -name '*.fault.json' -o -name '*.db' -o -name 'aiops.toml' \) 2>/dev/null || true)"
 [ -z "$left" ] || fail "left behind: $left"
-pgrep -f "aiops (start|watchdog)|aiops\.faults\.reaper" >/dev/null 2>&1 \
-  && fail "an aiops process is still running" || true
+# only processes of THIS run (their command line names the throwaway directory): the machine's
+# owner may have an aiops of their own running
+pgrep -f "$work" >/dev/null 2>&1 && fail "a process of this run is still running" || true
 
 printf '\nclean-machine check: OK\n'

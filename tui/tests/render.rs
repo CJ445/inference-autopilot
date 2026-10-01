@@ -81,7 +81,7 @@ fn a_healthy_dashboard_shows_real_gpu_vllm_control_plane_and_safety_state() {
         "Probe ✓", "18 ms", "Metrics ✓", "KV cache 0.0%", "Running 0", "Waiting 0",
         "No active incidents", "WATCHDOG", "● ARMED", "Identity ✓", "Budgets ✓",
         "AUDIT ✓ VERIFIED", "Observed 1.0s ago", "1 Home", "2 Incidents", "3 Lab", "4 Activity", "5 System",
-        "Review", "Quit",
+        "Commands", "Quit",
     ] {
         has(&s, needle);
     }

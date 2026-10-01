@@ -1,6 +1,6 @@
 # Implementation plan: simulation, golden scenarios, operator UX
 
-Status: Phase 0 (audit) and Phase 1 (simulation engine and golden scenario) and Phase 2 (Practice in the TUI) and Phase 3 (canonical real scenario) and Phase 4 (guarded real fault injector) and Phase 5 (plain language, four areas, accessibility; D-13) and Phase 6 (CI, suites, clean-machine check) and Phase 7 (final verification and the 15-question review; D-14) complete. Decisions and disagreements with the brief
+Status: Phase 0 (audit) and Phase 1 (simulation engine and golden scenario) and Phase 2 (Practice in the TUI) and Phase 3 (canonical real scenario) and Phase 4 (guarded real fault injector) and Phase 5 (plain language, four areas, accessibility; D-13) and Phase 6 (CI, suites, clean-machine check) and Phase 7 (final verification and the 15-question review; D-14) complete. A follow-up TUI-only overhaul (D-15: Home, Incidents, Lab, Activity, System; one recovery-test story; one pipeline) is complete; the backend and API are unchanged by it. Decisions and disagreements with the brief
 are in `DECISIONS.md`. The authority for behaviour is `PRD.md` (ADR-021 … ADR-027 are the most
 relevant).
 
@@ -132,3 +132,12 @@ Kubernetes; `real-local` / `real-gpu` stay opt-in. A documented clean-machine pr
 Web UI, OpenTelemetry, LLM RCA, Kubernetes expansion, more detectors, automatic workload
 start/restart/creation, arbitrary shell or Docker commands, GPU OOM stress, rollback, correlation,
 multi-user auth, cloud deployment, extra TUI screens for their own sake.
+
+### Phase 8: TUI overhaul (UX only; D-15)
+
+Five areas (Home, Incidents, Lab, Activity, System) with a header navigation strip instead of a
+sidebar; a Lab that lists exactly the two scenarios the backend supports; `R` runs a whole recovery
+test (the TUI asks for the simulated fault once the server reports healthy); a story built only from
+server-reported state and the incident timeline; one seven-stage pipeline on Home, the incident page
+and the Lab; recovery-request, real-fault and "recovery no longer needed" dialogs that never lose their
+decision line on a small terminal. No backend, API, state-machine, policy or verification change.

@@ -296,3 +296,22 @@ properly (what happened, the evidence, the action, why it needs your approval).
 (D-14) the TUI shows a dialog that says nothing was restarted. It recognises that refusal by the
 server's message text; a Python test pins the text so the two cannot drift apart silently. (A
 dedicated error code would be cleaner but is an API change, and this phase does not change the API.)
+
+**Update (implementation notes).**
+* `F` opens the real-fault dialog on Home and the Lab only. This changes a Phase 4 choice (D-12:
+  "only through the command palette"): the brief puts `[F] Inject` on screen. The dialog still sends
+  nothing until `Enter` after the 500 ms guard, `Esc` cancels, and `F` anywhere else does nothing
+  (tested), so the added exposure is one extra key that opens a dialog on two screens.
+* Dialogs shed optional sections on a short terminal and always keep the decision line (tested with
+  far more evidence than 18 rows can hold); the full explanation shows when there is room.
+* Warnings (`STALE`, `telemetry stale`, `SLOW API`) are placed first in the header so a crowded row
+  drops the status chips before it drops a warning (a test caught the opposite).
+* Probe latency is shown only for a probe that answered; a failed probe's duration is a timeout.
+* Ages are read as `31s`, `4m`, `7h`, not `26086s`.
+* The proposal disappears from the API once an incident is approved, so the TUI remembers the
+  action the server proposed earlier (client memory of server-reported data, cleared when the world
+  changes) to keep the finished story complete.
+* `tests/gpu/test_real_tui.py` asserted that no `aiops-tui` process existed anywhere on the machine
+  and so failed whenever the operator had their own TUI open (the earlier unexplained flake); it now
+  checks only the process it started. `scripts/clean_machine_check.sh` likewise only looks for
+  processes of its own throwaway directory.
