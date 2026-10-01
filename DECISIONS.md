@@ -243,3 +243,56 @@ simulation's deterministic transcript is unchanged.
 *Not done, on purpose.* A pending incident is not cleared automatically by a tick when its condition
 goes away: the operator may be reading it, and a flapping model would reopen and clear it repeatedly.
 The cost is a stale incident staying listed until acted on; it can no longer cause a restart.
+
+## D-15: TUI overhaul (Phase 8): Home, Incidents, Lab, Activity, System; one story, one pipeline
+
+*Brief:* make the TUI read as a terminal-native operator tool rather than an admin console; make
+testing obvious; keep every safety rule and the backend as it is. The backend, the API and the state
+machine do not change in this phase.
+
+**Five areas, no sidebar.** Home, Incidents, Lab, Activity, System (`1`..`5`; Help on `?`). A one-line
+navigation strip in the header replaces the 18-column sidebar: more room for content, less chrome.
+The mode badge (`LIVE · GPU-REAL` / `LIVE` / `SIMULATION`) and the connection state stay in the header.
+
+**The Lab.** "Practice" becomes "Recovery test" in every operator-facing word; `SIMULATION` is still
+in the header badge and in an always-on banner (`RECOVERY TEST · SIMULATION`), so renaming never hides
+what is simulated. The Lab lists exactly the two scenarios the backend supports: the simulated
+unresponsive model (safe), and, only when the server offers it, pausing the real workload (affects
+real infrastructure, behind the existing confirmation). It does not list scenarios that do not exist
+(the brief's illustrative "Recovery verification [RUN]" is not a separate backend scenario).
+
+**One key runs the whole test.** `R` asks the server for a fresh test session and, once the server
+reports the stage `healthy`, the TUI asks it to inject the simulated fault. This is two existing calls
+in sequence from the HTTP client; the server still enforces "only into a healthy model". Nothing is
+scripted: every line of the story is derived from what the server reports (the stage, the incident,
+its timeline, its recorded checks). `F` while testing stays as the manual retry if the automatic
+injection was refused.
+
+**Honest story, honest times.** Times come only from the incident timeline (server timestamps); the
+audit carries none and the TUI invents none. The brief's "00:02" style offsets are not shown; clock
+times are.
+
+**One pipeline.** `Observe → Detect → Diagnose → Propose → Approve → Recover → Verify`, each stage
+completed (`✓`), active/waiting (`→`), failed (`✗`), not run (`○`) or not applicable (`–`), derived
+from the incident status by one function and drawn identically on Home, the incident page and the Lab.
+Every state is a glyph and a word, never colour alone.
+
+**Metrics.** Home shows only what the backend reports: probe latency, the mean end-to-end latency
+(not a p95: vLLM exposes sum and count, not a percentile), requests per minute (only once two real
+observations exist), GPU memory, temperature and utilisation; anything else is `N/A`.
+
+**Keys that mean two things.** `A` and `R` decide an incident only on its page; elsewhere `R` runs a
+recovery test and `A` opens Activity (on the Incidents list they still only explain). `F` opens the
+real-fault confirmation (or breaks the model while testing); `I` opens Incidents; `P` is gone.
+The footer is contextual, so the keys on offer are always the keys that work.
+
+**Approval stays two-step.** The brief sketches `[A] APPROVE [R] REJECT [Esc] CANCEL` inside the
+dialog. Putting both decisions in one dialog would make a single stray key a decision, so the existing
+design stays: `A` or `R` on the incident page opens the request, `Enter` (ignored for the first
+500 ms) confirms exactly the action that was opened, `Esc` cancels. The request is now explained
+properly (what happened, the evidence, the action, why it needs your approval).
+
+**"Recovery no longer needed".** When the server refuses an approval because the problem is gone
+(D-14) the TUI shows a dialog that says nothing was restarted. It recognises that refusal by the
+server's message text; a Python test pins the text so the two cannot drift apart silently. (A
+dedicated error code would be cleaner but is an API change, and this phase does not change the API.)
