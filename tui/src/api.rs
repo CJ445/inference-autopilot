@@ -67,7 +67,12 @@ pub struct Client {
     endpoint: Endpoint,
     connect: Duration,
     total: Duration,
+    /// `/api/v1` for the real control plane, `/api/v1/practice` for a practice session.
+    prefix: &'static str,
 }
+
+pub const REAL_PREFIX: &str = "/api/v1";
+pub const PRACTICE_PREFIX: &str = "/api/v1/practice";
 
 fn valid_id(id: &str) -> bool {
     !id.is_empty()
@@ -81,7 +86,13 @@ impl Client {
             endpoint: Endpoint::parse(base)?,
             connect: Duration::from_millis(1000),
             total: Duration::from_millis(2000),
+            prefix: REAL_PREFIX,
         })
+    }
+
+    /// The same client, addressed to the practice (SIMULATION) namespace. The shapes are identical.
+    pub fn practice(&self) -> Client {
+        Client { prefix: PRACTICE_PREFIX, ..self.clone() }
     }
 
     pub fn with_timeouts(mut self, connect: Duration, total: Duration) -> Client {
@@ -127,31 +138,31 @@ impl Client {
     }
 
     pub fn status(&self) -> Result<Status, ApiError> {
-        self.call("GET", "/api/v1/status")
+        self.call("GET", &format!("{}/status", self.prefix))
     }
 
     pub fn incidents(&self) -> Result<Vec<Incident>, ApiError> {
-        Ok(self.call::<IncidentList>("GET", "/api/v1/incidents")?.incidents)
+        Ok(self.call::<IncidentList>("GET", &format!("{}/incidents", self.prefix))?.incidents)
     }
 
     pub fn incident(&self, id: &str) -> Result<Incident, ApiError> {
-        self.call("GET", &format!("/api/v1/incidents/{}", Self::checked(id)?))
+        self.call("GET", &format!("{}/incidents/{}", self.prefix, Self::checked(id)?))
     }
 
     pub fn audit(&self, limit: u32) -> Result<Audit, ApiError> {
         if limit == 0 || limit > AUDIT_MAX_LIMIT {
             return Err(ApiError::Invalid(format!("audit limit must be 1..={AUDIT_MAX_LIMIT}")));
         }
-        self.call("GET", &format!("/api/v1/audit?limit={limit}"))
+        self.call("GET", &format!("{}/audit?limit={limit}", self.prefix))
     }
 
     /// Asks the SERVER to approve. The server's policy decides; the TUI constructs no command.
     pub fn approve(&self, id: &str) -> Result<Incident, ApiError> {
-        self.call("POST", &format!("/api/v1/incidents/{}/remediation/approve", Self::checked(id)?))
+        self.call("POST", &format!("{}/incidents/{}/remediation/approve", self.prefix, Self::checked(id)?))
     }
 
     pub fn reject(&self, id: &str) -> Result<Incident, ApiError> {
-        self.call("POST", &format!("/api/v1/incidents/{}/remediation/reject", Self::checked(id)?))
+        self.call("POST", &format!("{}/incidents/{}/remediation/reject", self.prefix, Self::checked(id)?))
     }
 
     // ---- read-only system endpoints (the server runs the doctor; the TUI only asks) ------------
@@ -173,5 +184,24 @@ impl Client {
     /// header is the server's explicit-confirmation marker (a web page cannot send it).
     pub fn stop_control_plane(&self) -> Result<StopAck, ApiError> {
         self.call_with("POST", "/api/v1/control/stop", &[("X-Aiops-Confirm", "stop-control-plane")])
+    }
+
+    // ---- practice (SIMULATION): control calls. The simulation lives in the control plane. -------
+
+    fn practice_call(&self, action: &str) -> Result<(), ApiError> {
+        self.call::<serde_json::Value>("POST", &format!("{PRACTICE_PREFIX}/{action}")).map(|_| ())
+    }
+
+    pub fn practice_start(&self) -> Result<(), ApiError> {
+        self.practice_call("start")
+    }
+
+    /// Asks the SIMULATION to break its model. It cannot name a real workload or touch anything real.
+    pub fn practice_fault(&self) -> Result<(), ApiError> {
+        self.practice_call("fault")
+    }
+
+    pub fn practice_stop(&self) -> Result<(), ApiError> {
+        self.practice_call("stop")
     }
 }

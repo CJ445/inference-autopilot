@@ -30,11 +30,14 @@ pub struct Snapshot {
     pub audit: Option<Audit>,
     pub poll_ms: u128,
     pub fetched_at: Option<Instant>,
+    /// True if this was fetched from the practice (SIMULATION) namespace. A snapshot for the other
+    /// namespace (a poll that was in flight when practice started or ended) is discarded.
+    pub practice: bool,
 }
 
 impl Snapshot {
     pub fn new(status: Status, incidents: Vec<Incident>) -> Snapshot {
-        Snapshot { status, incidents, detail: None, audit: None, poll_ms: 0, fetched_at: None }
+        Snapshot { status, incidents, detail: None, audit: None, poll_ms: 0, fetched_at: None, practice: false }
     }
 }
 
@@ -98,11 +101,13 @@ pub enum Command {
     Help,
     Refresh,
     StopControlPlane,
+    Practice,
+    ExitPractice,
     Quit,
 }
 
 impl Command {
-    pub const ALL: [Command; 11] = [
+    pub const ALL: [Command; 13] = [
         Command::Overview,
         Command::Incidents,
         Command::Audit,
@@ -113,6 +118,8 @@ impl Command {
         Command::Help,
         Command::Refresh,
         Command::StopControlPlane,
+        Command::Practice,
+        Command::ExitPractice,
         Command::Quit,
     ];
 
@@ -128,6 +135,8 @@ impl Command {
             Command::Help => "Open Help",
             Command::Refresh => "Refresh",
             Command::StopControlPlane => "Stop control plane…",
+            Command::Practice => "Practice an incident",
+            Command::ExitPractice => "Exit practice",
             Command::Quit => "Quit",
         }
     }
@@ -141,11 +150,12 @@ pub struct Palette {
 
 impl Palette {
     /// Commands whose label contains every word of the query (case-insensitive).
-    pub fn matches(&self) -> Vec<Command> {
+    pub fn matches(&self, practicing: bool) -> Vec<Command> {
         let q = self.query.to_lowercase();
         let words: Vec<&str> = q.split_whitespace().collect();
         Command::ALL
             .into_iter()
+            .filter(|c| practicing || *c != Command::ExitPractice) // only offered while practicing
             .filter(|c| {
                 let label = c.label().to_lowercase();
                 words.iter().all(|w| label.contains(w))
@@ -162,15 +172,17 @@ pub struct ClientInfo {
 }
 
 /// The keys that do something, in the order Help lists them. `tests/help.rs` drives every row.
-pub const KEYMAP: [(&str, &str); 15] = [
+pub const KEYMAP: [(&str, &str); 17] = [
     ("↑ ↓", "Navigate / scroll"),
     ("Enter", "Inspect the selected incident"),
-    ("Esc", "Back / cancel / close"),
+    ("Esc", "Back / cancel / close (on the Overview while practicing: leave practice)"),
     ("Tab →", "Next screen"),
     ("←", "Previous screen"),
     ("1-7", "Jump to a screen (Overview … About)"),
     ("?", "Help"),
     ("Ctrl+P", "Command palette"),
+    ("P", "Practice an incident (simulated; nothing real is touched)"),
+    ("F", "Break the model while practicing (simulated)"),
     ("S", "Refresh now"),
     ("A", "Approve (on an incident's page, once it awaits a decision)"),
     ("R", "Reject (on an incident's page, once it awaits a decision)"),
@@ -204,6 +216,8 @@ pub struct Confirm {
     pub category: String,
     /// The server's RCA statement (empty if it sent none): why this action is proposed.
     pub why: String,
+    /// The decision is about a simulated incident: nothing real will be restarted.
+    pub practice: bool,
     pub opened: Instant,
 }
 
@@ -237,6 +251,10 @@ pub enum Effect {
     RunDiagnostics,
     /// The one lifecycle request: sent once per confirmation, never retried.
     StopControlPlane,
+    /// Practice (SIMULATION) control. They address only the simulation; nothing real.
+    StartPractice,
+    InjectFault,
+    EndPractice,
 }
 
 #[derive(Debug)]
@@ -245,6 +263,9 @@ pub enum Loaded {
     Version(Result<VersionInfo, ApiError>),
     Diagnostics(Result<Diagnostics, ApiError>),
     Stop(Result<StopAck, ApiError>),
+    PracticeStarted(Result<(), ApiError>),
+    PracticeFault(Result<(), ApiError>),
+    PracticeStopped(Result<(), ApiError>),
 }
 
 #[derive(Debug)]
@@ -259,6 +280,8 @@ pub enum Msg {
 pub struct Interest {
     pub detail_id: Option<String>,
     pub want_audit: bool,
+    /// Poll the practice (SIMULATION) namespace instead of the real one.
+    pub practice: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -284,6 +307,8 @@ pub struct App {
     pub version: Remote<VersionInfo>,
     pub diag: Remote<Diagnostics>,
     pub palette: Option<Palette>,
+    /// True while a practice (SIMULATION) session is on screen. Everything shown is simulated.
+    pub practice: bool,
     pub stop_confirm: bool,
     pub stop_opened: Instant,
     pub stop_sent: Option<Instant>,
@@ -318,6 +343,7 @@ impl App {
             version: Remote::Idle,
             diag: Remote::Idle,
             palette: None,
+            practice: false,
             stop_confirm: false,
             stop_opened: Instant::now(),
             stop_sent: None,
@@ -382,6 +408,7 @@ impl App {
                 _ => None,
             },
             want_audit: self.screen == Screen::Audit,
+            practice: self.practice,
         }
     }
 
@@ -468,9 +495,12 @@ impl App {
                     self.screen = self.back.clone();
                     self.scroll = 0;
                 }
+                Screen::Dashboard if self.practice => fx = vec![Effect::EndPractice],
                 Screen::Dashboard => {}
                 _ => fx = self.go(Screen::Dashboard),
             },
+            KeyCode::Char('p') | KeyCode::Char('P') => fx = self.begin_practice(),
+            KeyCode::Char('f') | KeyCode::Char('F') if self.practice => fx = self.inject_fault(),
             KeyCode::Char('a') | KeyCode::Char('A') => self.begin(ActionKind::Approve),
             KeyCode::Char('r') | KeyCode::Char('R') => self.begin(ActionKind::Reject),
             KeyCode::Char('d') | KeyCode::Char('D') if self.screen == Screen::Diagnostics => {
@@ -496,6 +526,7 @@ impl App {
     }
 
     fn palette_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        let practicing = self.practice;
         let Some(p) = self.palette.as_mut() else { return Vec::new() };
         match key.code {
             KeyCode::Esc => self.palette = None,
@@ -505,7 +536,7 @@ impl App {
             }
             KeyCode::Up => p.selected = p.selected.saturating_sub(1),
             KeyCode::Down => {
-                let last = p.matches().len().saturating_sub(1);
+                let last = p.matches(practicing).len().saturating_sub(1);
                 p.selected = (p.selected + 1).min(last);
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -513,7 +544,7 @@ impl App {
                 p.selected = 0;
             }
             KeyCode::Enter => {
-                let chosen = p.matches().get(p.selected).copied();
+                let chosen = p.matches(practicing).get(p.selected).copied();
                 self.palette = None;
                 if let Some(cmd) = chosen {
                     return self.run(cmd);
@@ -540,8 +571,54 @@ impl App {
                 self.begin_stop();
                 Vec::new()
             }
+            Command::Practice => self.begin_practice(),
+            Command::ExitPractice => vec![Effect::EndPractice],
             Command::Quit => vec![Effect::Quit],
         }
+    }
+
+    /// Asks the server for a fresh practice session (replacing any current one).
+    fn begin_practice(&mut self) -> Vec<Effect> {
+        if !matches!(self.conn, Conn::Online) {
+            self.say("control plane unreachable: practice needs its API", true);
+            return Vec::new();
+        }
+        if self.busy.is_some() {
+            self.say("an action is already in progress; wait for the server's answer", true);
+            return Vec::new();
+        }
+        vec![Effect::StartPractice]
+    }
+
+    /// The simulated fault, only into a healthy simulated model (the server enforces it too).
+    fn inject_fault(&mut self) -> Vec<Effect> {
+        let stage = self.snapshot.as_ref().and_then(|s| s.status.practice.as_ref()).map(|p| p.stage.as_str());
+        if stage == Some("healthy") {
+            return vec![Effect::InjectFault];
+        }
+        self.say("the simulated fault can only be injected while the model is healthy", true);
+        Vec::new()
+    }
+
+    fn enter_practice(&mut self) {
+        self.practice = true;
+        self.reset_view();
+    }
+
+    fn leave_practice(&mut self) {
+        self.practice = false;
+        self.reset_view();
+    }
+
+    /// A different namespace is a different world: nothing from the old one may stay on screen.
+    fn reset_view(&mut self) {
+        self.snapshot = None;
+        self.screen = Screen::Dashboard;
+        self.selected = 0;
+        self.scroll = 0;
+        self.confirm = None;
+        self.busy = None;
+        self.palette = None;
     }
 
     /// Switches screen and asks (read-only) for what the new screen needs and does not have yet.
@@ -648,6 +725,7 @@ impl App {
                 .and_then(|r| r.root_cause.as_ref())
                 .map(|c| c.statement.clone())
                 .unwrap_or_default(),
+            practice: self.practice,
             opened: self.now,
         };
         self.confirm = Some(confirm);
@@ -657,6 +735,11 @@ impl App {
 
     pub fn apply(&mut self, msg: Msg) {
         match msg {
+            Msg::Poll(Ok(snapshot)) if snapshot.practice != self.practice => {} // other namespace
+            Msg::Poll(Err(ApiError::Server { ref code, .. })) if self.practice && code == "NO_PRACTICE" => {
+                self.leave_practice();
+                self.say("the practice session ended; this is the real system again", false);
+            }
             Msg::Poll(Ok(mut snapshot)) => {
                 snapshot.fetched_at = Some(self.now);
                 self.update_rates(&snapshot.status);
@@ -710,6 +793,20 @@ impl App {
             Loaded::Stop(Err(ApiError::Server { code, .. })) => {
                 self.stop_sent = None;
                 self.say(&format!("the control plane refused to stop: {code}"), true)
+            }
+            Loaded::PracticeStarted(Ok(())) => {
+                self.enter_practice();
+                self.say("practice started: everything here is simulated", false);
+            }
+            Loaded::PracticeStarted(Err(e)) => self.say(&format!("could not start practice: {e}"), true),
+            Loaded::PracticeFault(Ok(())) => self.say("simulated fault injected: watch the detector", false),
+            Loaded::PracticeFault(Err(e)) => self.say(&format!("could not inject the fault: {e}"), true),
+            Loaded::PracticeStopped(result) => {
+                self.leave_practice();     // leave either way: the simulation holds nothing real
+                match result {
+                    Ok(()) => self.say("left practice: this is the real system again", false),
+                    Err(e) => self.say(&format!("left practice (the server did not confirm: {e})"), true),
+                }
             }
             Loaded::Stop(Err(_)) => self.say(
                 "no answer to the stop request: the control plane may already be stopping; check its state",

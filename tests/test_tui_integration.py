@@ -25,6 +25,7 @@ from term_screen import VScreen
 from test_engine import CONFIG, World
 
 from aiops.engine import Engine
+from aiops.practice import PracticeHost
 from aiops.serve import Service
 from aiops.system import System
 
@@ -72,7 +73,9 @@ class ControlPlane:
                 {"check": "gpu_headroom", "status": "WARN", "detail": "only 900 MiB free",
                  "blocking": False},
                 {"check": "kubectl", "status": "NOT_APPLICABLE", "detail": "n/a", "blocking": False}])
+        self.practice = PracticeHost(tick_seconds=0.1, verify_timeout=1)
         self.service = Service(self.engine, port=self.port, interval=0.2, system=self.system,
+                               practice=self.practice,
                                info={"profile": "stand-in", "provider": "kubernetes",
                                      "workload": "vllm-0", "pid": os.getpid()},
                                status_extra=lambda: {"watchdog": {
@@ -572,3 +575,34 @@ def test_the_confirmation_shows_the_reason_and_the_effect_and_progress_is_inline
         t.pump(0.1)
     assert cp.world.restarts == 1
     assert t.wait_screen("RESOLVED")
+
+
+def test_practice_walks_the_whole_loop_in_the_tui_without_touching_the_real_system(term, cp):
+    t = term(cp.url, rows=36, cols=130)
+    assert t.wait_screen("GPU_MEMORY_PRESSURE")                  # the REAL stand-in incident is on screen
+    t.send(b"p")
+    assert t.wait_screen("PRACTICE · SIMULATION")
+    assert t.wait_screen("Everything is healthy. Press F to break the model")
+    assert "GPU_MEMORY_PRESSURE" not in t.screen()                # none of the real data is shown
+    t.send(b"f")
+    assert t.wait_screen("Open the incident (Enter), review it, then approve (A).", timeout=15)
+    assert t.wait_screen("INFERENCE_UNRESPONSIVE")
+    t.send(b"\r")
+    assert t.wait_screen("Classification")                        # the incident page, practice data
+    assert "GPU_MEMORY_PRESSURE" not in t.screen() and "PRACTICE · SIMULATION" in t.screen()
+    t.send(b"a")
+    assert t.wait_screen("A simulated restart: nothing real is restarted.")
+    time.sleep(0.8)
+    t.send(b"\r")
+    assert t.wait_screen("RESOLVED", timeout=15)
+    assert cp.world.restarts == 0                                  # the real workload was never touched
+    assert cp.api("/api/v1/incidents")["incidents"][0]["status"] == "POLICY_CHECK"
+    t.send(b"\x1b")                                               # back to the practice overview
+    time.sleep(0.6)
+    t.send(b"\x1b")                                               # leave practice
+    assert t.wait_screen("GPU_MEMORY_PRESSURE")                   # the real system is back
+    assert "PRACTICE" not in t.screen() and "SIMULATION" not in t.screen()
+    assert cp.practice.session is None                             # and the simulation was discarded
+    assert cp.world.restarts == 0
+    t.send(b"q")
+    assert t.proc.wait(timeout=10) == 0

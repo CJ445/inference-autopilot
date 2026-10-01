@@ -366,3 +366,82 @@ fn headers_with_control_characters_are_refused_before_sending() {
     assert!(r.is_err());
     assert!(f.requests().is_empty());
 }
+
+// --- practice (SIMULATION): a separate namespace with the same shapes -------------------------------------
+
+#[test]
+fn the_practice_client_addresses_the_practice_namespace_and_the_real_one_does_not() {
+    let f = fake(vec![
+        Reply::Raw(http(200, STATUS)),
+        Reply::Raw(http(200, "{\"incidents\": []}")),
+        Reply::Raw(http(200, PENDING)),
+        Reply::Raw(http(200, AUDIT)),
+        Reply::Raw(http(200, RESOLVED)),
+        Reply::Raw(http(200, PENDING)),
+        Reply::Raw(http(200, STATUS)),
+    ]);
+    let real = f.client();
+    let p = real.practice();
+    p.status().unwrap();
+    p.incidents().unwrap();
+    p.incident("inc_001").unwrap();
+    p.audit(50).unwrap();
+    p.approve("inc_001").unwrap();
+    p.reject("inc_001").unwrap();
+    real.status().unwrap();                           // the original client is unchanged
+    assert_eq!(
+        f.requests(),
+        vec![
+            "GET /api/v1/practice/status HTTP/1.1",
+            "GET /api/v1/practice/incidents HTTP/1.1",
+            "GET /api/v1/practice/incidents/inc_001 HTTP/1.1",
+            "GET /api/v1/practice/audit?limit=50 HTTP/1.1",
+            "POST /api/v1/practice/incidents/inc_001/remediation/approve HTTP/1.1",
+            "POST /api/v1/practice/incidents/inc_001/remediation/reject HTTP/1.1",
+            "GET /api/v1/status HTTP/1.1",
+        ]
+    );
+}
+
+#[test]
+fn practice_control_calls_are_single_posts_to_fixed_paths() {
+    let ok = |s: &str| Reply::Raw(http(200, s));
+    let f = fake(vec![
+        ok(r#"{"active": true, "mode": "SIMULATION", "stage": "healthy"}"#),
+        ok(r#"{"active": true, "mode": "SIMULATION", "stage": "detecting"}"#),
+        ok(r#"{"active": false, "mode": "SIMULATION", "stage": null}"#),
+    ]);
+    let c = f.client();
+    c.practice_start().unwrap();
+    c.practice_fault().unwrap();
+    c.practice_stop().unwrap();
+    assert_eq!(
+        f.requests(),
+        vec![
+            "POST /api/v1/practice/start HTTP/1.1",
+            "POST /api/v1/practice/fault HTTP/1.1",
+            "POST /api/v1/practice/stop HTTP/1.1",
+        ]
+    );
+}
+
+#[test]
+fn a_missing_practice_session_is_a_server_error_with_its_code() {
+    let f = fake(vec![Reply::Raw(http(
+        409,
+        r#"{"error": {"code": "NO_PRACTICE", "message": "no practice session is running", "request_id": "r"}}"#,
+    ))]);
+    match f.client().practice().status() {
+        Err(ApiError::Server { status: 409, code, .. }) => assert_eq!(code, "NO_PRACTICE"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn the_practice_status_shape_parses_with_its_mode_and_stage() {
+    let body = STATUS.replacen("{", "{\"mode\": \"SIMULATION\", \"practice\": {\"stage\": \"awaiting_approval\"}, ", 1);
+    let f = fake(vec![Reply::Raw(http(200, &body))]);
+    let s = f.client().practice().status().unwrap();
+    assert_eq!(s.mode.as_deref(), Some("SIMULATION"));
+    assert_eq!(s.practice.unwrap().stage, "awaiting_approval");
+}

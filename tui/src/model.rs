@@ -26,6 +26,17 @@ pub struct Status {
     /// Whether the managed workload exists (only reported where the control plane can tell).
     #[serde(default)]
     pub workload: Option<WorkloadState>,
+    /// `SIMULATION` for a practice session; `REAL` (or absent on an older server) otherwise.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Present only in a practice session: where the simulated loop is.
+    #[serde(default)]
+    pub practice: Option<PracticeInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PracticeInfo {
+    pub stage: String,
 }
 
 /// `absent` | `stopped` | `running` | `unknown`, exactly as the server reports it.

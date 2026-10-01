@@ -156,15 +156,24 @@ pub fn render(f: &mut Frame, app: &App) {
         f.render_widget(Paragraph::new(msg).style(fg(WARNING)), area);
         return;
     }
+    // While practicing, a loud one-line banner sits under the header on EVERY screen.
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(5), Constraint::Length(1)])
+        .constraints(if app.practice {
+            vec![Constraint::Length(3), Constraint::Length(1), Constraint::Min(5), Constraint::Length(1)]
+        } else {
+            vec![Constraint::Length(3), Constraint::Min(5), Constraint::Length(1)]
+        })
         .split(area);
     header(f, rows[0], app);
+    if app.practice {
+        practice_banner(f, rows[1], app);
+    }
+    let (main, foot) = if app.practice { (rows[2], rows[3]) } else { (rows[1], rows[2]) };
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(SIDEBAR_W), Constraint::Min(20)])
-        .split(rows[1]);
+        .split(main);
     sidebar(f, body[0], app);
     // An approve/reject in flight is shown inline, above the screen it was started from.
     let pane = if app.busy.is_some() && body[1].height > 8 {
@@ -188,7 +197,7 @@ pub fn render(f: &mut Frame, app: &App) {
         Screen::About => about(f, pane, app),
         Screen::Help => help(f, pane, app),
     }
-    footer(f, rows[2], app);
+    footer(f, foot, app);
     if app.confirm.is_some() {
         confirm_modal(f, area, app);
     } else if app.stop_confirm {
@@ -241,20 +250,25 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
             let age = app.data_age().map_or(0, |d| d.as_secs());
             chips.push(bold(format!("STALE {age}s  "), WARNING));
         }
-        chips.push(muted(format!("{}   ", na(s.status.info.profile.clone()))));
-        let armed = s.status.watchdog.as_ref().map(|w| w.state == "armed");
-        chips.push(muted("Watchdog "));
-        chips.push(match armed {
-            Some(true) => span("✓", HEALTHY),
-            _ => span("!", CRITICAL),
-        });
-        chips.push(muted("   Audit "));
-        chips.push(mark(s.status.audit.as_ref().map(|a| a.valid)));
-        if app.telemetry_stale() {
-            chips.push(span(format!("   telemetry stale ({:.0}s)", app.telemetry_age_secs().unwrap_or(0.0)), WARNING));
-        }
-        if s.poll_ms > 1500 {
-            chips.push(span(format!("   SLOW API ({:.1}s)", s.poll_ms as f64 / 1000.0), WARNING));
+        if s.status.mode.as_deref() == Some("SIMULATION") {
+            // a simulated session has no real watchdog or telemetry to report on
+            chips.push(muted("simulated session"));
+        } else {
+            chips.push(muted(format!("{}   ", na(s.status.info.profile.clone()))));
+            let armed = s.status.watchdog.as_ref().map(|w| w.state == "armed");
+            chips.push(muted("Watchdog "));
+            chips.push(match armed {
+                Some(true) => span("✓", HEALTHY),
+                _ => span("!", CRITICAL),
+            });
+            chips.push(muted("   Audit "));
+            chips.push(mark(s.status.audit.as_ref().map(|a| a.valid)));
+            if app.telemetry_stale() {
+                chips.push(span(format!("   telemetry stale ({:.0}s)", app.telemetry_age_secs().unwrap_or(0.0)), WARNING));
+            }
+            if s.poll_ms > 1500 {
+                chips.push(span(format!("   SLOW API ({:.1}s)", s.poll_ms as f64 / 1000.0), WARNING));
+            }
         }
     } else {
         chips.push(muted("Watchdog ?   Audit ?"));
@@ -337,6 +351,17 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
                 ("←→", "Screens", true, 2), ("Ctrl+P", "Commands", true, 8), ("?", "Help", true, 1),
                 ("Q", "Quit", true, 9),
             ];
+            if app.practice {
+                let healthy = app.snapshot.as_ref().and_then(|s| s.status.practice.as_ref()).map(|p| p.stage.as_str()) == Some("healthy");
+                hints.push(("F", "Break it", healthy, 8));
+                hints.push(("P", "Restart practice", true, 2));
+                if app.screen == Screen::Dashboard {
+                    hints.retain(|h| h.0 != "Esc");
+                    hints.push(("Esc", "Leave practice", true, 6));
+                }
+            } else {
+                hints.push(("P", "Practice", true, 4));
+            }
             match app.screen {
                 Screen::Diagnostics => hints.push(("D", "Run again", true, 7)),
                 Screen::ControlPlane => hints.push(("X", "Stop", true, 7)),
@@ -369,6 +394,7 @@ fn no_data(f: &mut Frame, area: Rect, app: &App) {
             lines.push(Line::from(muted(format!(" Retrying {} (attempt {attempts})…", app.url))));
             lines.push(Line::from(muted(" Start it with `aiops` (or `aiops start`); this screen will recover by itself.")));
         }
+        _ if app.practice => lines.push(Line::from(span(" Preparing the practice session…", WARNING))),
         _ => lines.push(Line::from(span(format!(" Connecting to {}…", app.url), WARNING))),
     }
     f.render_widget(Paragraph::new(lines), area);
@@ -394,6 +420,10 @@ fn overview(f: &mut Frame, area: Rect, app: &App) {
     }
     let w = area.width as usize;
     let mut l = headline(app, w);
+    if app.practice {
+        l.push(blank());
+        l.extend(practice_guide(app));
+    }
     l.push(blank());
     l.extend(incident_rows(app, w));
     l.push(blank());
@@ -405,6 +435,38 @@ fn overview(f: &mut Frame, area: Rect, app: &App) {
     l.push(blank());
     l.extend(safety_section(app, w));
     f.render_widget(Paragraph::new(l), area);
+}
+
+/// What to do next in the practice, from the stage the SERVER reports (never guessed here).
+fn practice_guide(app: &App) -> Vec<Line<'static>> {
+    let stage = app.snapshot.as_ref().and_then(|s| s.status.practice.as_ref()).map(|p| p.stage.as_str());
+    let text = match stage {
+        None => "Preparing the practice session…".to_string(),
+        Some("healthy") => "Everything is healthy. Press F to break the model (simulated).".to_string(),
+        Some("detecting") => "The model stopped answering. The detector needs two failed checks in a row before it opens an incident.".to_string(),
+        Some("awaiting_approval") => "A restart was proposed. Open the incident (Enter), review it, then approve (A).".to_string(),
+        Some("recovering") => "Restarting and verifying the recovery…".to_string(),
+        Some("resolved") => "Recovered and verified (simulated). Press P to practice again, or Esc to leave.".to_string(),
+        Some(other) => format!("The incident closed as {other}. Press P to practice again, or Esc to leave."),
+    };
+    vec![Line::from(vec![plain(" "), bold("Practice  ", WARNING), plain(text)])]
+}
+
+/// The loud one-line label shown on every screen while a simulation is on screen.
+fn practice_banner(f: &mut Frame, area: Rect, app: &App) {
+    let real_system_screen = matches!(
+        app.screen,
+        Screen::ControlPlane | Screen::Settings | Screen::Diagnostics | Screen::About
+    );
+    let note = if real_system_screen {
+        "These screens show the real system; the practice itself touches nothing real."
+    } else {
+        "Nothing here touches your GPU, containers, or real workload."
+    };
+    let style = Style::default().fg(Color::Black).bg(WARNING).add_modifier(Modifier::BOLD);
+    let text = format!(" PRACTICE · SIMULATION   {note}");
+    let pad = " ".repeat((area.width as usize).saturating_sub(text.chars().count()));
+    f.render_widget(Paragraph::new(Line::from(Span::styled(format!("{text}{pad}"), style))), area);
 }
 
 fn headline(app: &App, w: usize) -> Vec<Line<'static>> {
@@ -439,6 +501,9 @@ fn incident_rows(app: &App, w: usize) -> Vec<Line<'static>> {
     };
     if active.is_empty() {
         lines.push(Line::from(span("   No active incidents", HEALTHY)));
+        if !app.practice {
+            lines.push(Line::from(muted("   Press P to practice an incident (simulated; nothing real is touched)")));
+        }
     }
     for (idx, i) in &active {
         let action = i.proposal.as_ref().map_or("-".to_string(), |p| p.action.clone());
@@ -585,6 +650,14 @@ fn budget_state(w: &Watchdog) -> Result<(), Vec<String>> {
 
 fn safety_section(app: &App, w: usize) -> Vec<Line<'static>> {
     let s = app.snapshot.as_ref();
+    if s.map_or(false, |s| s.status.mode.as_deref() == Some("SIMULATION")) {
+        let audit = match s.and_then(|s| s.status.audit.as_ref()) {
+            Some(a) if a.valid => Line::from(span(format!(" AUDIT ✓ VERIFIED ({} events, simulated)", a.events), HEALTHY)),
+            Some(_) => Line::from(bold(" AUDIT ✗ INTEGRITY FAILURE", CRITICAL)),
+            None => Line::from(muted(" AUDIT N/A")),
+        };
+        return vec![rule("Safety", None, w), Line::from(muted(" Simulated session: there is nothing real to protect.")), audit];
+    }
     let wd = s.and_then(|s| s.status.watchdog.as_ref());
     let (badge, detail) = watchdog_badge(wd);
     let mut dog = vec![badge];
@@ -944,12 +1017,15 @@ fn confirm_modal(f: &mut Frame, area: Rect, app: &App) {
     let row = |label: &str, value: String| {
         Line::from(vec![plain(" "), muted(format!("{label:<10}")), plain(value)])
     };
-    let mut lines = vec![
-        Line::from(bold(format!(" {} {}?", c.kind.verb(), c.action), WARNING)),
+    let mut lines = vec![Line::from(bold(format!(" {} {}?", c.kind.verb(), c.action), WARNING))];
+    if c.practice {
+        lines.push(Line::from(vec![plain(" "), bold("PRACTICE · SIMULATION", WARNING), muted("  nothing real is touched")]));
+    }
+    lines.extend(vec![
         blank(),
         row("Incident", format!("{}  {}", c.incident_id, c.category)),
         row("Workload", c.workload.clone()),
-    ];
+    ]);
     if c.why.is_empty() {
         lines.push(row("Why", "no RCA statement from the server".into()));
     } else {
@@ -958,6 +1034,8 @@ fn confirm_modal(f: &mut Frame, area: Rect, app: &App) {
         }
     }
     let effect = match (c.kind, c.action.as_str()) {
+        (ActionKind::Reject, _) if c.practice => "No action is taken; the simulated proposal is closed.".to_string(),
+        (ActionKind::Approve, _) if c.practice => "A simulated restart: nothing real is restarted.".to_string(),
         (ActionKind::Reject, _) => "No action is taken on the workload; the proposal is closed.".to_string(),
         (ActionKind::Approve, "restart_workload") => {
             "Restarts the workload: inference is unavailable until it recovers. There is no rollback.".to_string()
@@ -1269,7 +1347,7 @@ fn stop_modal(f: &mut Frame, area: Rect, app: &App) {
 
 fn palette_modal(f: &mut Frame, area: Rect, app: &App) {
     let Some(p) = &app.palette else { return };
-    let items = p.matches();
+    let items = p.matches(app.practice);
     let h = (items.len().max(1) as u16 + 4).min(area.height.saturating_sub(2));
     let w = 56.min(area.width.saturating_sub(4));
     let rect = Rect { x: area.x + (area.width - w) / 2, y: area.y + 2, width: w, height: h };

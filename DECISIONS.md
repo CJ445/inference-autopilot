@@ -66,3 +66,28 @@ generation and then three consecutive successful simulated completions, through 
 `D` currently re-runs diagnostics on the Diagnostics screen only. Phase 5 moves Diagnostics under
 System and makes `D` mean "details" on Overview and incident pages; the two are never active on
 the same screen.
+
+## D-8: The practice namespace mirrors the real API; the TUI reuses its screens
+
+*Brief:* reuse the existing incident page and approval UX; "do not create a separate fake practice UI".
+*Decision:* the control plane serves `/api/v1/practice/{status,incidents,incidents/{id},
+incidents/{id}/remediation/approve|reject,audit}` with exactly the real shapes, plus
+`/practice/{start,fault,stop}`. The TUI's client simply addresses a different prefix, so Overview,
+Incidents, the incident page, the approval dialog and Audit are the same code. The router can only
+rewrite a practice path to an engine-shaped route; `/health`, `/version`, `/config`, `/diagnostics`
+and `/control/stop` are unreachable through the practice prefix (tested, including a confirmed
+stop sent through it). Each namespace takes the lock of its own engine.
+
+## D-9: The practice banner says "containers", not "Docker"
+
+*Brief:* "Nothing here touches your GPU, Docker, or real workload."
+*Conflict:* `tui/tests/safety.rs` forbids the word "Docker" anywhere in the TUI source: its purpose
+is to prove the TUI has no reference to the container runtime. Weakening that scan to allow one
+string would weaken a safety test.
+*Decision:* the banner reads "Nothing here touches your GPU, containers, or real workload."
+
+## D-10: A poll for the other namespace is discarded
+
+A real poll that is in flight when practice starts (or a practice poll when it ends) would paint the
+wrong world under, or without, the banner. Every snapshot carries the namespace it was fetched for
+and the app drops a mismatch; entering and leaving practice also clears the view.

@@ -95,6 +95,9 @@ fn wall_clock() -> f64 {
 /// One poll: status and incidents always; detail and audit only while the operator is looking.
 fn fetch(client: &Client, want: &Interest) -> Result<Snapshot, ApiError> {
     let started = Instant::now();
+    let practice = want.practice;
+    // The practice (SIMULATION) namespace has the same shapes at a different, separate path.
+    let client = &if practice { client.practice() } else { client.clone() };
     let status = client.status()?;
     let incidents = client.incidents()?;
     let detail = match &want.detail_id {
@@ -110,6 +113,7 @@ fn fetch(client: &Client, want: &Interest) -> Result<Snapshot, ApiError> {
     snapshot.detail = detail;
     snapshot.audit = audit;
     snapshot.poll_ms = started.elapsed().as_millis();
+    snapshot.practice = practice;          // so a snapshot for the other namespace is discarded
     Ok(snapshot)
 }
 
@@ -262,8 +266,24 @@ fn interactive(o: &Opts) -> Result<(), String> {
                                 Effect::StopControlPlane => {
                                     spawn_call(&client, Duration::from_secs(10), tx.clone(), |c| Loaded::Stop(c.stop_control_plane()))
                                 }
-                                Effect::Approve(id) => spawn_action(&client, ActionKind::Approve, id, tx.clone()),
-                                Effect::Reject(id) => spawn_action(&client, ActionKind::Reject, id, tx.clone()),
+                                Effect::StartPractice => spawn_call(&client, Duration::from_secs(10), tx.clone(), |c| {
+                                    Loaded::PracticeStarted(c.practice_start())
+                                }),
+                                Effect::InjectFault => spawn_call(&client, Duration::from_secs(10), tx.clone(), |c| {
+                                    Loaded::PracticeFault(c.practice_fault())
+                                }),
+                                Effect::EndPractice => spawn_call(&client, Duration::from_secs(10), tx.clone(), |c| {
+                                    Loaded::PracticeStopped(c.practice_stop())
+                                }),
+                                // a decision goes to the namespace the operator is looking at
+                                Effect::Approve(id) => {
+                                    let c = if app.practice { client.practice() } else { client.clone() };
+                                    spawn_action(&c, ActionKind::Approve, id, tx.clone())
+                                }
+                                Effect::Reject(id) => {
+                                    let c = if app.practice { client.practice() } else { client.clone() };
+                                    spawn_action(&c, ActionKind::Reject, id, tx.clone())
+                                }
                             }
                         }
                     }

@@ -142,6 +142,19 @@ The explicit commands remain for scripts and debugging:
 
 ## Try the failure loop safely (SIMULATION)
 
+In the TUI: press **`P`** (or `Ctrl+P` then "Practice an incident"). A persistent amber banner,
+`PRACTICE · SIMULATION`, appears on every screen, and the Overview tells you what to do next from
+the stage the server reports: **`F`** breaks the (simulated) model, the detector opens an incident
+after two failed checks in a row, you open it (`Enter`), review it and approve (`A`), a simulated
+restart runs, and the production verifier judges recovery from the simulated state. `P` practices
+again; `Esc` on the Overview leaves practice and returns to the real system. The confirmation says
+"A simulated restart: nothing real is restarted." The real system, its incidents, its watchdog and
+its workload are never touched, and nothing from the practice is ever shown as real (or the
+reverse): the practice has its own routes (`/api/v1/practice/...`), its own engine, store and lock,
+and the TUI discards any poll that belongs to the other one.
+
+From the command line, without the TUI:
+
     aiops demo --approve        # or --reject; with neither, it asks when run in a terminal
 
 This runs the **real** control loop (the same engine, detector, evidence, deterministic RCA,

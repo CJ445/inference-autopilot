@@ -267,7 +267,7 @@ fn the_palette_filters_navigates_and_executes() {
     for c in "diag".chars() {
         a.handle_key(key(c));
     }
-    assert_eq!(a.palette.as_ref().unwrap().matches(), vec![Command::Diagnostics]);
+    assert_eq!(a.palette.as_ref().unwrap().matches(false), vec![Command::Diagnostics]);
     assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Effect::RunDiagnostics]);
     assert!(a.palette.is_none() && matches!(a.screen, Screen::Diagnostics));
 
