@@ -2,7 +2,7 @@ from aiops.audit import AuditLog
 from aiops.incident import Incident
 from aiops.remediate import remediate
 
-PROPOSAL = {"action": "restart_pod", "parameters": {"pod": "vllm-0"}}
+PROPOSAL = {"action": "restart_workload", "parameters": {"workload": "vllm-0"}}
 LIMITS = {"gpu_memory_used_bytes": 7_500_000_000, "error_rate": 0.05}
 
 
@@ -13,10 +13,10 @@ class Cluster:
         self.uid, self.ready, self.restarts = "abc", True, 0
         self.restart_works, self.recovers = restart_works, recovers
 
-    def get_pod(self, name):
-        return {"uid": self.uid, "ready": self.ready}
+    def get_workload(self, name):
+        return {"id": self.uid, "ready": self.ready}
 
-    def restart_pod(self, name):
+    def restart_workload(self, name):
         self.restarts += 1
         if self.restart_works:
             self.uid = f"uid-{self.restarts}"
@@ -95,11 +95,11 @@ class SlowRecovery(Cluster):
         super().__init__()
         self.polls_left = polls_needed
 
-    def get_pod(self, name):
+    def get_workload(self, name):
         if self.restarts and self.polls_left > 0:
             self.polls_left -= 1
-            return {"uid": self.uid, "ready": False}
-        return super().get_pod(name)
+            return {"id": self.uid, "ready": False}
+        return super().get_workload(name)
 
 
 def test_verification_waits_for_slow_recovery():
@@ -140,11 +140,11 @@ def test_pod_briefly_missing_while_statefulset_recreates_it_is_retried():
     class Recreating(Cluster):
         missing = 3
 
-        def get_pod(self, name):
+        def get_workload(self, name):
             if self.restarts and self.missing:
                 self.missing -= 1
                 raise ClusterError('pods "vllm-0" not found')
-            return super().get_pod(name)
+            return super().get_workload(name)
 
     inc = diagnosed()
     remediate(inc, PROPOSAL, Recreating(), approved=True, audit=AuditLog(), limits=LIMITS,
@@ -156,10 +156,10 @@ def test_pod_that_never_comes_back_is_unresolved_not_a_crash():
     from aiops.kubectl import ClusterError
 
     class Gone(Cluster):
-        def get_pod(self, name):
+        def get_workload(self, name):
             if self.restarts:
                 raise ClusterError("not found")
-            return super().get_pod(name)
+            return super().get_workload(name)
 
     inc = diagnosed()
     remediate(inc, PROPOSAL, Gone(), approved=True, audit=AuditLog(), limits=LIMITS,
@@ -171,7 +171,7 @@ def test_missing_target_before_execution_fails_without_restarting():
     from aiops.kubectl import ClusterError
 
     class NoPod(Cluster):
-        def get_pod(self, name):
+        def get_workload(self, name):
             raise ClusterError('pods "vllm-0" not found')
 
     inc, cluster, audit = diagnosed(), NoPod(), AuditLog()

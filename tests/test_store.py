@@ -32,8 +32,8 @@ def test_restarted_engine_restores_incident_pending_proposal_and_audit(tmp_path)
     inc = restored.incidents[0]
     assert inc.incident_id == first.incident_id and inc.status == "POLICY_CHECK"
     assert inc.evidence == first.evidence and inc.timeline == first.timeline
-    assert restored.pending == {first.incident_id: {"action": "restart_pod",
-                                                    "parameters": {"pod": "vllm-0"}}}
+    assert restored.pending == {first.incident_id: {"action": "restart_workload",
+                                                    "parameters": {"workload": "vllm-0"}}}
     assert len(restored.audit.events) == 4 and restored.audit.verify()
 
 
@@ -70,7 +70,7 @@ def test_approval_is_persisted_before_execution_so_a_crash_cannot_replay_it(tmp_
 
     e = Engine(w, w, CONFIG, store=Store(db))
     inc = e.tick()
-    w.restart_pod = crash
+    w.restart_workload = crash
     with pytest.raises(KeyboardInterrupt):
         e.approve(inc.incident_id)
 
@@ -98,7 +98,7 @@ def crashed_mid_restart(db):
 
     e = Engine(w, w, CONFIG, store=Store(db))
     inc = e.tick()
-    w.restart_pod = crash
+    w.restart_workload = crash
     with pytest.raises(KeyboardInterrupt):
         e.approve(inc.incident_id)
     return w, inc

@@ -4342,7 +4342,7 @@ This section must be maintained during development.
 - [x] insufficient evidence
 
 ## Phase 7 — Remediation
-- [x] action catalog (one action: restart_pod)
+- [x] action catalog (one semantic action: restart_workload; providers translate it)
 - [x] policy (in-code approval gate; not OPA)
 - [x] approval (API approve/reject; no TUI yet)
 - [x] executor (kubectl, fixed argv, pinned context)
@@ -4395,6 +4395,7 @@ This section must be maintained during development.
 | ADR-013 | 2026-10-01 | Watchdog is a stdlib supervisor that owns the experimental child, not a monitor of the engine | §14 requires independence from engine, Kubernetes, Prometheus, LLM and TUI | Any GPU fault must be launched through `supervise()`; unreadable sensors abort |
 | ADR-014 | 2026-10-01 | GPU pressure fault caps the child's own CUDA allocator (`set_per_process_memory_fraction`) and allocates until PyTorch raises OutOfMemoryError, under the watchdog | Real application-level OOM (§40) whose bound is enforced by the allocator itself, with the watchdog as the second layer | Answers OQ-004 for this machine only (3 runs); limits 4 GiB / 60 s / 85% VRAM / 80 C |
 | ADR-015 | 2026-10-01 | `python -m aiops serve` runs the tick loop and the API in one process; `--context` is mandatory, there is no `--host`; if SQLite is unavailable, approve/reject/incident-creation roll back and raise (API: 503 DEPENDENCY_ERROR) | §86 fail-closed; never act on whatever cluster happens to be current; API stays loopback-only | Does not replace the PRD's `aiops start/stop` lifecycle (Phase 1), which is still unbuilt |
+| ADR-016 | 2026-10-01 | Narrow `WorkloadProvider` (get_workload, restart_workload); the engine reasons about `restart_workload`. `KubernetesProvider` (kubectl) and `DockerProvider` (fixed-argv docker CLI, project labels) implement it. Docker is the first REAL-GPU validation backend; Kubernetes stays the primary control surface | GPU-in-kind is unproven and an 8.7 GB vLLM image makes it a poor first step; the Docker socket is root-equivalent, so the provider exposes only get/restart of labeled containers (re-checked after inspect), fails closed on zero/ambiguous/mismatched identity, and treats `ContainerID:StartedAt` as lifecycle identity because `docker restart` keeps the ID (verified on the real daemon) | Renamed restart_pod -> restart_workload everywhere; no Docker SDK dependency (same pattern as kubectl); no socket proxy in the MVP; GPU-in-kind deferred |
 ```
 
 ---

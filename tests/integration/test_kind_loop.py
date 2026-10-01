@@ -15,7 +15,7 @@ import urllib.request
 
 import pytest
 
-from aiops.kubectl import KubectlCluster
+from aiops.kubectl import KubernetesProvider
 from aiops.prometheus import PrometheusAdapter, TelemetryError
 
 pytestmark = pytest.mark.skipif(
@@ -97,7 +97,7 @@ def http(base, path, method="GET", timeout=10):
 
 def test_fault_to_verified_recovery_over_http_against_a_real_serve_process(prom_url, tmp_path):
     prom = PrometheusAdapter(prom_url, QUERIES)
-    cluster = KubectlCluster("default", context=CONTEXT, metrics_source=prom)
+    cluster = KubernetesProvider("default", context=CONTEXT, metrics_source=prom)
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -112,7 +112,7 @@ def test_fault_to_verified_recovery_over_http_against_a_real_serve_process(prom_
         wait_for(lambda: http(base, "/health")["status"] == "HEALTHY", 30, "serve up")
         time.sleep(3)
         assert http(base, "/api/v1/incidents")["incidents"] == []
-        uid_before = cluster.get_pod("vllm-0")["uid"]
+        uid_before = cluster.get_workload("vllm-0")["id"]
 
         # controlled fault (actor: FAULT_INJECTOR), bounded: lives only in the pod process
         kubectl("exec", "vllm-0", "--", "python", "-c",
@@ -125,16 +125,16 @@ def test_fault_to_verified_recovery_over_http_against_a_real_serve_process(prom_
         assert incident["status"] == "POLICY_CHECK"
         assert incident["category"] == "GPU_MEMORY_PRESSURE"
         assert len(incident["evidence"]) >= 2
-        assert incident["proposal"] == {"action": "restart_pod",
-                                        "parameters": {"pod": "vllm-0"}}
-        assert cluster.get_pod("vllm-0")["uid"] == uid_before  # nothing changed pre-approval
+        assert incident["proposal"] == {"action": "restart_workload",
+                                        "parameters": {"workload": "vllm-0"}}
+        assert cluster.get_workload("vllm-0")["id"] == uid_before  # nothing changed pre-approval
 
         done = http(base, f"/api/v1/incidents/{incident['incident_id']}/remediation/approve",
                     "POST", timeout=150)
 
         # judged from independently observed state, not from the API's own claim
         assert done["status"] == "RESOLVED", done
-        assert cluster.get_pod("vllm-0")["uid"] != uid_before
+        assert cluster.get_workload("vllm-0")["id"] != uid_before
         assert prom.metrics()["gpu_memory_used_bytes"] < THRESHOLD
         assert len(http(base, "/api/v1/incidents")["incidents"]) == 1  # no duplicates after
 

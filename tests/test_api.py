@@ -51,7 +51,7 @@ def test_incident_detail_exposes_status_evidence_and_pending_proposal(api):
     status, detail = call(base, f"/api/v1/incidents/{inc.incident_id}")
     assert status == 200
     assert detail["status"] == "POLICY_CHECK" and len(detail["evidence"]) >= 2
-    assert detail["proposal"] == {"action": "restart_pod", "parameters": {"pod": "vllm-0"}}
+    assert detail["proposal"] == {"action": "restart_workload", "parameters": {"workload": "vllm-0"}}
 
 
 def test_approve_over_http_remediates_and_resolves(api):
@@ -101,7 +101,7 @@ def test_unexpected_engine_failure_returns_contract_error_without_internals(api)
     def boom(name):
         raise RuntimeError("secret internal detail /home/cyril/x.py")
 
-    w.get_pod = boom
+    w.get_workload = boom
     status, body = call(base, f"/api/v1/incidents/{inc.incident_id}/remediation/approve", "POST")
     assert status == 500
     assert set(body["error"]) == {"code", "message", "request_id"}

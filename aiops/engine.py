@@ -129,8 +129,8 @@ class Engine:
         if rca["insufficient_evidence"]:
             incident.transition("INSUFFICIENT_EVIDENCE")
         else:
-            proposal = propose(incident, {"action": "restart_pod",
-                                          "parameters": {"pod": self.config["pod"]}},
+            proposal = propose(incident, {"action": "restart_workload",
+                                          "parameters": {"workload": self.config["workload"]}},
                                self.audit)
             if proposal:
                 self.pending[incident.incident_id] = proposal

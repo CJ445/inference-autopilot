@@ -97,7 +97,7 @@ def test_cli_has_safe_defaults_and_requires_an_explicit_cluster_context():
     with pytest.raises(SystemExit):
         p.parse_args(["--context", "kind-x"])                # no --prometheus-url
     a = p.parse_args(["--context", "kind-x", "--prometheus-url", "http://x"])
-    assert (a.port, a.namespace, a.pod, a.interval) == (8080, "default", "vllm-0", 5)
+    assert (a.port, a.namespace, a.workload, a.interval) == (8080, "default", "vllm-0", 5)
     assert not hasattr(a, "host")  # loopback only; no way to expose the API
 
 

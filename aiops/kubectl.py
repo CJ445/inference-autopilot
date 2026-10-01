@@ -6,7 +6,7 @@ class ClusterError(Exception):
     pass
 
 
-class KubectlCluster:
+class KubernetesProvider:
     """Real Kubernetes access via fixed kubectl argv; never a shell string."""
 
     def __init__(self, namespace, run=subprocess.run, metrics_source=None, context=None):
@@ -27,12 +27,12 @@ class KubectlCluster:
             raise ClusterError(e.stderr or str(e)) from e
         return result.stdout
 
-    def get_pod(self, name):
+    def get_workload(self, name):
         pod = json.loads(self._kubectl("get", "pod", name, "-o", "json"))
         conditions = pod["status"].get("conditions", [])
         ready = any(c["type"] == "Ready" and c["status"] == "True" for c in conditions)
-        return {"uid": pod["metadata"]["uid"], "ready": ready}
+        return {"id": pod["metadata"]["uid"], "ready": ready}
 
-    def restart_pod(self, name):
+    def restart_workload(self, name):
         self._kubectl("delete", "pod", name, "--wait=true")
         return "ok"

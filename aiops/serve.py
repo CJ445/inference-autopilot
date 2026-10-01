@@ -6,7 +6,7 @@ import traceback
 
 from aiops.api import make_server
 from aiops.engine import Engine
-from aiops.kubectl import KubectlCluster
+from aiops.kubectl import KubernetesProvider
 from aiops.prometheus import PrometheusAdapter
 from aiops.store import Store
 
@@ -59,7 +59,7 @@ def build_parser():
     p.add_argument("--port", type=int, default=8080)
     p.add_argument("--db", default="aiops.db")
     p.add_argument("--namespace", default="default")
-    p.add_argument("--pod", default="vllm-0")
+    p.add_argument("--workload", default="vllm-0")
     p.add_argument("--interval", type=float, default=5)
     p.add_argument("--gpu-threshold", type=int, default=7_500_000_000)
     p.add_argument("--error-rate-limit", type=float, default=0.05)
@@ -69,8 +69,8 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     prom = PrometheusAdapter(args.prometheus_url, QUERIES)
-    cluster = KubectlCluster(args.namespace, context=args.context, metrics_source=prom)
-    config = {"service": "vllm", "pod": args.pod, "gpu_threshold": args.gpu_threshold,
+    cluster = KubernetesProvider(args.namespace, context=args.context, metrics_source=prom)
+    config = {"service": "vllm", "workload": args.workload, "gpu_threshold": args.gpu_threshold,
               "error_rate_limit": args.error_rate_limit}
     service = Service(Engine(prom, cluster, config, store=Store(args.db)),
                       port=args.port, interval=args.interval)

@@ -3,7 +3,7 @@ import pytest
 from aiops.engine import Engine, NothingToApprove
 from aiops.prometheus import TelemetryError
 
-CONFIG = {"service": "vllm", "pod": "vllm-0", "gpu_threshold": 7_500_000_000,
+CONFIG = {"service": "vllm", "workload": "vllm-0", "gpu_threshold": 7_500_000_000,
           "error_rate_limit": 0.05, "timeout": 1, "interval": 0.01}
 
 
@@ -21,10 +21,10 @@ class World:
                 "error_rate": 0.4 if self.fault else 0.0,
                 "allocation_failures_total": self.failures}
 
-    def get_pod(self, name):
-        return {"uid": self.uid, "ready": True}
+    def get_workload(self, name):
+        return {"id": self.uid, "ready": True}
 
-    def restart_pod(self, name):
+    def restart_workload(self, name):
         self.restarts += 1
         self.uid, self.fault, self.failures = f"uid-{self.restarts}", False, 0
         return "ok"
@@ -49,8 +49,8 @@ def test_fault_creates_diagnosed_incident_with_evidence_and_pending_proposal():
     assert inc.category == "GPU_MEMORY_PRESSURE"
     assert len(inc.evidence) >= 2 and all(ev["incident_id"] == inc.incident_id
                                           for ev in inc.evidence)
-    assert e.pending[inc.incident_id] == {"action": "restart_pod",
-                                          "parameters": {"pod": "vllm-0"}}
+    assert e.pending[inc.incident_id] == {"action": "restart_workload",
+                                          "parameters": {"workload": "vllm-0"}}
     assert w.restarts == 0  # nothing mutated without approval
 
 

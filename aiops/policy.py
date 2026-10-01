@@ -1,7 +1,7 @@
 import re
 
-# action -> required parameter names. Only restart_pod for the first slice.
-CATALOG = {"restart_pod": {"pod"}}
+# action -> required parameter names. One semantic action; providers translate it.
+CATALOG = {"restart_workload": {"workload"}}
 K8S_NAME = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
 
 
