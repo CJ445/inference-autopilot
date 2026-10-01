@@ -156,9 +156,9 @@ other confirmation. While a fault is active a banner is on every screen with the
 the palette offers "Resume the workload now". It is hidden while practicing and when the server does
 not offer faults.
 
-**Known limit.** After the lease expires the workload recovers and the incident the hang produced
-stays pending (the ADR-019 gap); approving it would restart a healthy workload, which the operator
-can see. The default duration is long enough (120 s) to review and approve.
+**Known limit (closed in D-14).** After the lease expires the workload recovers and the incident the
+hang produced stays listed; approving it is now refused and closes it as CLEARED (D-14). The default
+duration is long enough (120 s) to review and approve.
 
 ## D-13: Plain language by default, technical detail one key away (Phase 5)
 
@@ -218,3 +218,28 @@ scan (`tui/tests/safety.rs`) forbids anywhere in the TUI source, and that scan i
 
 **Screens.** `--screen` accepts `system` and `activity`; the old `control`, `settings`, `diagnostics`
 and `about` are aliases for `system`. Keys `5`..`7` no longer exist (four areas; Help is `?`).
+
+## D-14: An approval is checked against the current picture; a restart never starts a workload (Phase 7)
+
+*Found by the final self-review (questions 5 and 8), not by a failing test.* Two gaps:
+(1) `DockerProvider.restart_workload` re-checked labels and identity but not that the container was
+running, and `docker restart` STARTS a stopped container: approving after the operator had stopped
+the workload would have started it, an automatic workload start. (2) A proposal was not tied to the
+picture it was made from: after a fault ended, the incident stayed pending and approving it restarted
+a healthy model (the ADR-019 gap), a restart that interrupts inference and has no rollback.
+
+*Decision.* (1) `restart_workload` refuses unless the container is running (a paused container is
+still running, so the fault scenario is unaffected). (2) `Engine.approve` consults the latest
+observation before consuming the proposal and refuses, when the condition behind it is gone: the
+model answered since (INFERENCE_UNRESPONSIVE), memory is back under its limit (GPU_MEMORY_PRESSURE),
+the workload is stopped or absent, or there is no observation at all (fail closed). Nothing is
+restarted; the approval is NOT recorded as granted; an `approval_refused` event with the reason is
+audited; the incident closes as CLEARED (new `POLICY_CHECK -> CLEARED` transition: nothing was
+remediated or verified, so it is not RESOLVED); the API answers 409 POLICY_DENIED "The problem is no
+longer present; nothing was restarted."; if the refusal cannot be saved it is rolled back like any
+other write. Judged from the last observation (a tick old at most), not a fresh probe, so the
+simulation's deterministic transcript is unchanged.
+
+*Not done, on purpose.* A pending incident is not cleared automatically by a tick when its condition
+goes away: the operator may be reading it, and a flapping model would reopen and clear it repeatedly.
+The cost is a stale incident staying listed until acted on; it can no longer cause a restart.

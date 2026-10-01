@@ -174,6 +174,10 @@ pub fn event_phrase(e: &AuditEvent) -> String {
             None => "Policy checked".into(),
         },
         "approval_granted" => with_id("You approved the fix"),
+        "approval_refused" => {
+            let reason = e.data.get("reason").and_then(Value::as_str).unwrap_or("the problem is no longer present");
+            format!("Nothing was restarted: {reason}{}", id.map_or(String::new(), |i| format!(" ({i})")))
+        }
         "approval_denied" => with_id("You declined the fix"),
         "remediation_started" => "Fix started".into(),
         "remediation_finished" => "Fix finished".into(),

@@ -22,6 +22,10 @@ class NothingToApprove(Exception):
     pass
 
 
+class ConditionGone(Exception):
+    """The problem was no longer present when the operator approved; nothing was restarted."""
+
+
 class WorkloadBusy(Exception):
     """Another incident holds this workload; at most one remediation per workload (PRD §130)."""
 
@@ -200,6 +204,10 @@ class Engine:
         incident = self.get(incident_id)
         if self._conflicts(incident, self.pending[incident_id]["parameters"]["workload"]):
             raise WorkloadBusy(incident_id)  # fail closed: nothing is consumed or changed
+        gone = self._condition_gone(incident)
+        if gone:
+            self._refuse_stale(incident_id, incident, gone)
+            raise ConditionGone(incident_id)
         c = self.config
         snapshot = self._snapshot()
         proposal = self.pending.pop(incident_id)
@@ -221,6 +229,39 @@ class Engine:
                 on_executing=self._persist, verify=verify)
         self._unresponsive_streak = 0         # a restart makes it a new instance: count afresh
         self._persist()
+
+    def _condition_gone(self, incident):
+        """Why a proposal made earlier must NOT be executed now, or None if the problem persists.
+
+        Judged from the latest observation (a tick old at most). A restart interrupts inference, so
+        it is never run against a model that has answered since, a memory reading that is back
+        under its limit, or a workload that is not there (the stale-proposal case: the fault ended
+        while the incident waited for the operator).
+        """
+        if self.workload_state in ("absent", "stopped"):
+            return f"the workload is {self.workload_state}"
+        observed = self.last_observation
+        if observed is None:
+            return "there is no current observation"
+        if incident.category == "INFERENCE_UNRESPONSIVE" and not detect_inference_unresponsive(observed):
+            return "the model is answering again"
+        if incident.category == "GPU_MEMORY_PRESSURE" and not detect_gpu_memory_pressure(
+                observed["gpu_memory_used_bytes"], self.config["gpu_threshold"]):
+            return "GPU memory is back under its limit"
+        return None
+
+    def _refuse_stale(self, incident_id, incident, reason):
+        snapshot, status, n_timeline = self._snapshot(), incident.status, len(incident.timeline)
+        proposal = self.pending.pop(incident_id)
+        self.audit.append("approval_refused", {"incident_id": incident_id, "reason": reason})
+        incident.transition("CLEARED")
+
+        def undo():
+            self.pending[incident_id] = proposal
+            incident.status = status
+            del incident.timeline[n_timeline:]
+
+        self._persist_or_rollback(snapshot, undo)
 
     def reject(self, incident_id):
         if incident_id not in self.pending:

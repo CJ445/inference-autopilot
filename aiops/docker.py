@@ -42,6 +42,10 @@ class DockerProvider:
 
     def restart_workload(self, name):
         container = self._inspect(self._resolve(name), name)  # re-check right before acting
+        if not container["State"]["Running"]:
+            # `docker restart` would START a stopped container. Starting the workload is the
+            # operator's decision, never a remediation's.
+            raise ClusterError("the workload is not running; it is not started automatically")
         self._docker("restart", "-t", str(RESTART_GRACE_SECONDS), container["Id"])
         return "ok"
 

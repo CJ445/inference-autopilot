@@ -119,6 +119,8 @@ fn audit_events_read_as_what_happened_and_unknown_events_keep_their_name() {
     assert_eq!(e("remediation_proposed", json!({"action": "restart_workload"})), "Fix proposed: Restart the model server");
     assert_eq!(e("policy_evaluated", json!({"decision": "APPROVAL_REQUIRED"})), "Needs your OK");
     assert_eq!(e("approval_granted", json!({"incident_id": "inc_001"})), "You approved the fix (inc_001)");
+    assert_eq!(e("approval_refused", json!({"incident_id": "inc_001", "reason": "the model is answering again"})),
+               "Nothing was restarted: the model is answering again (inc_001)");
     assert_eq!(e("approval_denied", json!({"incident_id": "inc_001"})), "You declined the fix (inc_001)");
     assert_eq!(e("verification_finished", json!({"checks": {"a": true, "b": true}})), "Recovery verified");
     assert_eq!(e("verification_finished", json!({"checks": {"a": true, "b": false}})), "Recovery was not verified");

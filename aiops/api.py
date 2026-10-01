@@ -6,7 +6,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-from aiops.engine import CLOSED, NothingToApprove, WorkloadBusy
+from aiops.engine import CLOSED, ConditionGone, NothingToApprove, WorkloadBusy
 from aiops.faults.core import DEFAULT_DURATION, FaultError
 from aiops.practice import PracticeStateError
 from aiops.store import StoreUnavailable
@@ -234,6 +234,9 @@ def make_server(engine, host="127.0.0.1", port=8080, lock=None, info=None, statu
             except WorkloadBusy:
                 return self._error(409, "POLICY_DENIED",
                                    "Another remediation holds this workload.")
+            except ConditionGone:
+                return self._error(409, "POLICY_DENIED",
+                                   "The problem is no longer present; nothing was restarted.")
             self._send(200, v.detail(incident))
 
         def _body(self):

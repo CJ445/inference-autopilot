@@ -7,7 +7,8 @@ TRANSITIONS = {
     # re-diagnosed when new evidence arrives, or cleared when the condition disappears
     "INSUFFICIENT_EVIDENCE": {"TRIAGING", "CLEARED"},
     "PROPOSED": {"POLICY_CHECK"},
-    "POLICY_CHECK": {"APPROVED", "REJECTED"},
+    # CLEARED: the condition was gone when the operator approved, so nothing was restarted
+    "POLICY_CHECK": {"APPROVED", "REJECTED", "CLEARED"},
     "APPROVED": {"EXECUTING"},
     "EXECUTING": {"VERIFYING", "EXECUTION_FAILED"},
     "VERIFYING": {"RESOLVED", "ROLLBACK_REQUIRED", "UNRESOLVED"},

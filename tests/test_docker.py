@@ -187,3 +187,18 @@ def test_inspect_reporting_a_different_or_malformed_container_fails_closed(full_
     with pytest.raises(ClusterError, match="identity"):
         provider(d).restart_workload("vllm")
     assert "restart" not in d.verbs()
+
+
+def test_a_stopped_workload_is_never_started_by_a_restart():
+    d = Docker(inspect=inspect_json(running=False, health=None))
+    with pytest.raises(ClusterError, match="not running"):
+        provider(d).restart_workload("vllm")
+    assert all(argv[1] != "restart" for argv, _ in d.calls)       # `docker restart` would start it
+
+
+def test_a_paused_workload_is_still_restartable():
+    paused = json.loads(inspect_json())
+    paused[0]["State"]["Paused"] = True                            # Running stays true while paused
+    d = Docker(inspect=json.dumps(paused))
+    assert provider(d).restart_workload("vllm") == "ok"
+    assert any(argv[1] == "restart" for argv, _ in d.calls)

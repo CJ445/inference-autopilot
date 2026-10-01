@@ -136,6 +136,32 @@ def test_the_golden_scenario_driven_by_the_guarded_injector(vllm, tmp_path):
         assert c.wd_record()["status"] == "ARMED"                         # a fault is not the watchdog's business
 
 
+def test_approving_after_the_fault_has_ended_restarts_nothing_on_the_real_machine(vllm, tmp_path):
+    """The stale-proposal case (ADR-019): the incident waits for the operator, the lease expires and
+    the model answers again; approving must not restart the healthy workload."""
+    provider = DockerProvider("vllm")
+    with ControlPlane(tmp_path) as c:
+        c.start()
+        wait_for(lambda: http(c.port, "/api/v1/status")["last_observation"], 60, "an observation")
+        identity = provider.get_workload("vllm")["id"]
+        assert inject(c, 30)[0] == 202 and paused()
+        iid = wait_for(lambda: http(c.port, "/api/v1/incidents")["incidents"], 90, "an incident")[0]["incident_id"]
+        assert http(c.port, f"/api/v1/incidents/{iid}")["status"] == "POLICY_CHECK"
+        wait_for(lambda: not paused(), 90, "the lease to resume the workload")
+        wait_for(lambda: http(c.port, "/api/v1/status")["last_observation"]["inference_probe_ok"] is True,
+                 60, "the model to answer again")
+        code, body = post(c.port, f"/api/v1/incidents/{iid}/remediation/approve")
+        assert code == 409 and body["error"]["code"] == "POLICY_DENIED", body
+        assert "no longer present" in body["error"]["message"]
+        assert provider.get_workload("vllm")["id"] == identity          # NOT restarted
+        assert VllmClient(BASE, MODEL, timeout=5).probe()["ok"] is True
+        detail = http(c.port, f"/api/v1/incidents/{iid}")
+        assert detail["status"] == "CLEARED"
+        names = [e["event"] for e in http(c.port, "/api/v1/audit")["events"]]
+        assert "approval_refused" in names and "approval_granted" not in names \
+            and "remediation_started" not in names
+
+
 def test_unsafe_requests_are_refused_on_the_real_machine_and_nothing_is_paused(vllm, tmp_path):
     provider = DockerProvider("vllm")
     with ControlPlane(tmp_path) as c:
