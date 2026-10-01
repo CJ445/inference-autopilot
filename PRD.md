@@ -770,6 +770,9 @@ VERIFYING → UNRESOLVED
 
 POLICY_CHECK → REJECTED        (operator rejects the proposal; audit: approval_denied)
 
+INSUFFICIENT_EVIDENCE → TRIAGING (re-diagnosis: a later observation supplies the missing
+                                  evidence; unchanged evidence changes nothing)
+
 EXECUTING → EXECUTION_FAILED   (also used when a restart interrupts an in-flight
                                 remediation: the outcome was never verified, so the
                                 incident is never marked RESOLVED)
@@ -4321,7 +4324,7 @@ This section must be maintained during development.
 - [x] Prometheus (adapter + real Prometheus in kind)
 - [ ] OpenTelemetry
 - [ ] Kubernetes events
-- [ ] GPU telemetry
+- [x] GPU telemetry (real nvidia-smi through RealTelemetry into the engine: UUID, memory, temperature, utilization; DCGM not used)
 
 ## Phase 4 — Fault Injection
 - [ ] fault catalog
@@ -4397,6 +4400,7 @@ This section must be maintained during development.
 | ADR-015 | 2026-10-01 | `python -m aiops serve` runs the tick loop and the API in one process; `--context` is mandatory, there is no `--host`; if SQLite is unavailable, approve/reject/incident-creation roll back and raise (API: 503 DEPENDENCY_ERROR) | §86 fail-closed; never act on whatever cluster happens to be current; API stays loopback-only | Does not replace the PRD's `aiops start/stop` lifecycle (Phase 1), which is still unbuilt |
 | ADR-016 | 2026-10-01 | Narrow `WorkloadProvider` (get_workload, restart_workload); the engine reasons about `restart_workload`. `KubernetesProvider` (kubectl) and `DockerProvider` (fixed-argv docker CLI, project labels) implement it. Docker is the first REAL-GPU validation backend; Kubernetes stays the primary control surface | GPU-in-kind is unproven and an 8.7 GB vLLM image makes it a poor first step; the Docker socket is root-equivalent, so the provider exposes only get/restart of labeled containers (re-checked after inspect), fails closed on zero/ambiguous/mismatched identity, and treats `ContainerID:StartedAt` as lifecycle identity because `docker restart` keeps the ID (verified on the real daemon) | Renamed restart_pod -> restart_workload everywhere; no Docker SDK dependency (same pattern as kubectl); no socket proxy in the MVP; GPU-in-kind deferred |
 | ADR-017 | 2026-10-01 | The vLLM image's CUDA version must be compatible with the HOST driver; `vllm/vllm-openai:v0.30.0` (CUDA 13.0.2) was tried first and is unusable here, so the real-GPU path pins `v0.10.0` (CUDA 12.8.1) | Measured: driver 570.207 supports CUDA <= 12.8; the CUDA 13 image failed in cudaGetDeviceCount() with Error 804 (forward compatibility attempted on non-supported HW, which NVIDIA allows only on datacenter GPUs). No cu128 tag exists; v0.10.0 and v0.11.0 are the CUDA 12.8.1 builds | `doctor` (§83) should compare driver CUDA against the image's CUDA_VERSION before starting; image sizes: v0.30.0 8.73 GB compressed / 21.6 GB on disk, v0.30.0-cu129 13.68 GB, v0.10.0 10.86 GB |
+| ADR-018 | 2026-10-01 | Real-GPU observation = nvidia-smi (GPU UUID, memory, temperature, utilization) + a live inference probe + vLLM /metrics; the engine's second supporting RCA signal on this path is the inference probe, not `allocation_failures_total` (vLLM v0.10.0 exposes no error/OOM/GPU-memory metric). `INSUFFICIENT_EVIDENCE` incidents are re-diagnosed when evidence changes. Fault: the bounded stressor next to vLLM (1/2/3 GiB, peak 49/61.5/74% VRAM) caused a real OOM in the stressor and ZERO failures in ~163 vLLM probes, because vLLM preallocates its VRAM, and raising the budget past that would breach the 85% watchdog limit; `docker pause` (bounded, reversible) makes vLLM unresponsive (probes and /metrics time out, VRAM unchanged at 35.4%) and `restart_workload` recovers a paused container (inference back in ~25 s) | The memory-pressure stressor and the hang are INDEPENDENT faults: the engine's GPU_MEMORY_PRESSURE label for 'pressure + failing probe' is a deterministic correlation rule, not a demonstrated cause; pressure with a healthy probe is INSUFFICIENT_EVIDENCE and never restarts a healthy workload; an unresponsive workload at NORMAL memory is not detected yet (needs an INFERENCE_UNRESPONSIVE detector/RCA rule); Docker health lags real recovery (still `starting` when inference already works), so verification must also use the inference probe |
 ```
 
 ---
@@ -4411,7 +4415,7 @@ These must be resolved through feasibility spikes rather than assumptions.
 | OQ-001 | Which Kubernetes runtime has the lowest acceptable resource overhead? | Medium |
 | OQ-002 | Which small inference model is appropriate for the target GPU? | Medium |
 | OQ-003 | Which vLLM metrics are stable enough for the first release? | Medium (v0.10.0 recorded; stability across versions untested; no failure/GPU-memory metric exists, so GPU memory must come from NVML) |
-| OQ-004 | What is the safest reproducible real GPU allocation-failure scenario? | High (partially answered by ADR-014: stressor only, no vLLM co-residency yet) |
+| OQ-004 | What is the safest reproducible real GPU allocation-failure scenario? | High (answered negatively for vLLM: see ADR-018; the stressor never made vLLM fail) |
 | OQ-005 | Which telemetry should be mandatory versus optional? | Medium |
 | OQ-006 | Should OTel traces be MVP or Phase 2? | Low |
 | OQ-007 | Which LLM provider gives the best local development tradeoff? | Medium |

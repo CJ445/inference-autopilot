@@ -4,6 +4,7 @@ TRANSITIONS = {
     "DETECTED": {"TRIAGING"},
     "TRIAGING": {"DIAGNOSED"},
     "DIAGNOSED": {"PROPOSED", "INSUFFICIENT_EVIDENCE"},
+    "INSUFFICIENT_EVIDENCE": {"TRIAGING"},  # re-diagnosed when new evidence arrives
     "PROPOSED": {"POLICY_CHECK"},
     "POLICY_CHECK": {"APPROVED", "REJECTED"},
     "APPROVED": {"EXECUTING"},

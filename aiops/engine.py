@@ -67,6 +67,8 @@ class Engine:
 
         active = self._active(self.config["service"], "GPU_MEMORY_PRESSURE")
         if active:
+            if active.status == "INSUFFICIENT_EVIDENCE":
+                self._rediagnose(active, observed)
             return active
         snapshot = self._snapshot()
         incident = self._open_incident(observed)
@@ -120,7 +122,10 @@ class Engine:
         self.incidents.append(incident)
         self.audit.append("incident_created", {"incident_id": incident.incident_id})
         incident.transition("TRIAGING")
+        self._diagnose(incident, observed)
+        return incident
 
+    def _diagnose(self, incident, observed):
         incident.evidence = self._evidence(incident, observed)
         rca = diagnose(incident.evidence)
         self.audit.append("rca_generated", {"incident_id": incident.incident_id,
@@ -134,20 +139,46 @@ class Engine:
                                self.audit)
             if proposal:
                 self.pending[incident.incident_id] = proposal
-        return incident
+
+    def _rediagnose(self, incident, observed):
+        """New evidence may now support a diagnosis; unchanged evidence changes nothing."""
+        if diagnose(self._evidence(incident, observed))["insufficient_evidence"]:
+            return
+        snapshot = self._snapshot()
+        status, evidence, n_timeline = incident.status, incident.evidence, len(incident.timeline)
+        incident.transition("TRIAGING")
+        self._diagnose(incident, observed)
+
+        def undo():
+            incident.status, incident.evidence = status, evidence
+            del incident.timeline[n_timeline:]
+
+        self._persist_or_rollback(snapshot, undo)
 
     def _evidence(self, incident, observed):
         queries = getattr(self.telemetry, "queries", {})
+        sources = getattr(self.telemetry, "sources", {})
 
-        def ev(n, metric, source_key, supports):
-            return {"evidence_id": f"{incident.incident_id}_ev_{n}", "source": "prometheus",
-                    "metric": metric, "query": queries.get(source_key),
-                    "value": observed[source_key],
-                    "relation": "supports" if supports else "contradicts",
-                    "source_type": "real", "incident_id": incident.incident_id}
+        def ev(n, metric, value, supports, query_key=None):
+            e = {"evidence_id": f"{incident.incident_id}_ev_{n}",
+                 "source": sources.get(metric, "prometheus"), "metric": metric,
+                 "query": queries.get(query_key or metric), "value": value,
+                 "relation": "supports" if supports else "contradicts",
+                 "source_type": "real", "incident_id": incident.incident_id}
+            if "gpu_uuid" in observed:
+                e["resource"] = observed["gpu_uuid"]
+            return e
 
-        return [
-            ev(1, "gpu_memory_used_bytes", "gpu_memory_used_bytes", True),
-            ev(2, "vllm_allocation_failure", "allocation_failures_total",
-               observed["allocation_failures_total"] > 0),
-        ]
+        evidence = [ev(1, "gpu_memory_used_bytes", observed["gpu_memory_used_bytes"], True)]
+        if "inference_probe_ok" in observed:  # real vLLM path: a live inference probe
+            evidence.append(ev(2, "inference_probe",
+                               {"ok": observed["inference_probe_ok"],
+                                "latency_ms": observed["inference_probe_latency_ms"],
+                                "error": observed["inference_probe_error"]},
+                               not observed["inference_probe_ok"]))
+        elif "allocation_failures_total" in observed:  # CPU stand-in path
+            evidence.append(ev(2, "vllm_allocation_failure",
+                               observed["allocation_failures_total"],
+                               observed["allocation_failures_total"] > 0,
+                               query_key="allocation_failures_total"))
+        return evidence

@@ -1,4 +1,4 @@
-GPU_MEMORY_SIGNALS = {"gpu_memory_used_bytes", "vllm_allocation_failure"}
+GPU_MEMORY_SIGNALS = {"gpu_memory_used_bytes", "vllm_allocation_failure", "inference_probe"}
 MIN_SUPPORTING = 2
 
 
