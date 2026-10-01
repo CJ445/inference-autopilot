@@ -39,21 +39,19 @@ The binary is `tui/target/release/aiops-tui`. `aiops` finds it there (or, failin
 
 ### 2. Install the `aiops` command
 
-`aiops` is the Python package's command. Use a virtual environment and an editable install, so
-the command keeps pointing at this checkout (and the TUI built above):
+`aiops` is the Python package's command. Install it once as a user-level tool, so it is on your
+`PATH` in every shell and directory (the same way `claude` and `opencode` are), with an editable
+install so it keeps pointing at this checkout and the TUI built above:
 
-    python3 -m venv .venv
-    . .venv/bin/activate
-    pip install -e .
+    uv tool install --editable .        # puts a symlink in ~/.local/bin
 
-pip puts the executable in the environment's `bin/` directory (`.venv/bin/aiops`), which
-activating the environment adds to `PATH`. Without activating it, call `.venv/bin/aiops`, or add
-the directory yourself for the current shell:
+`~/.local/bin` must be on your `PATH` (`uv tool update-shell` adds it). Upgrade or remove with
+`uv tool upgrade inference-autopilot` / `uv tool uninstall inference-autopilot`.
 
-    export PATH="$PWD/.venv/bin:$PATH"
+Without `uv`, use a virtual environment (the command then exists only while it is activated, or
+by its full path `.venv/bin/aiops`):
 
-To make that permanent, put the same line (with the absolute path of the checkout) in your shell
-configuration, e.g. `~/.bashrc`. Nothing in the application hard-codes a home directory.
+    python3 -m venv .venv && . .venv/bin/activate && pip install -e .
 
 The Rust binary is **not** the `aiops` command and `cargo install` is not the install path.
 
@@ -64,9 +62,15 @@ The Rust binary is **not** the `aiops` command and `cargo install` is not the in
 
 ### 4. Configure
 
-`aiops` reads a runtime profile (`aiops.toml` in the current directory, or `--config PATH`).
-Examples are in `deploy/profiles/` (`docker-real-gpu.toml`, `kubernetes.toml`). A profile names
-exactly one managed workload; unknown keys are errors.
+`aiops` reads a runtime profile: `--config PATH`, else `./aiops.toml`, else
+`~/.config/aiops/aiops.toml`. So a one-time setup lets you run `aiops` from any directory:
+
+    mkdir -p ~/.config/aiops
+    cp deploy/profiles/docker-real-gpu.toml ~/.config/aiops/aiops.toml
+
+Relative paths in a profile (`db`, `state_file`) resolve next to the profile file, so the state
+and the startup log live in `~/.config/aiops/`. Other examples are in `deploy/profiles/`. A
+profile names exactly one managed workload; unknown keys are errors.
 
 ## Using it
 

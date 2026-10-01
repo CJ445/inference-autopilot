@@ -9,7 +9,7 @@ from pathlib import Path
 
 from aiops import lifecycle
 from aiops.doctor import FAIL, format_results, run_doctor
-from aiops.profile import ProfileError, load_profile
+from aiops.profile import ProfileError, default_config_path, load_profile
 
 USAGE = ("usage: aiops [--config PATH]   (no command: open the operator UI, starting the control\n"
          "                                  plane first if it is not running)\n"
@@ -26,7 +26,8 @@ def build_parser():
                         ("status", "report OBSERVED state of the control plane and workload"),
                         ("doctor", "read-only diagnosis of prerequisites")):
         p = sub.add_parser(name, help=help_)
-        p.add_argument("--config", default="aiops.toml", help="runtime profile (TOML)")
+        p.add_argument("--config", default=default_config_path(),
+                       help="runtime profile (TOML); default ./aiops.toml, else ~/.config/aiops/aiops.toml")
         if name in ("status", "doctor"):
             p.add_argument("--json", action="store_true")
     return parser
@@ -71,7 +72,7 @@ def _tui(argv):
     """Hand the terminal to the Rust TUI. It is a client of the HTTP API only: this command
     starts no control plane, reads no state and touches no database."""
     parser = argparse.ArgumentParser(prog="aiops tui")
-    parser.add_argument("--config", default="aiops.toml")
+    parser.add_argument("--config", default=default_config_path())
     parser.add_argument("--url")
     args, extra = parser.parse_known_args(argv)
     if args.url:

@@ -17,7 +17,7 @@ import urllib.request
 from pathlib import Path
 
 from aiops import lifecycle
-from aiops.profile import ProfileError, load_profile
+from aiops.profile import ProfileError, default_config_path, load_profile
 
 STARTUP_TIMEOUT_SECONDS = 90      # doctor + watchdog arming (15s) + API bind, with headroom
 POLL_SECONDS = 0.2
@@ -93,6 +93,9 @@ def ensure_control_plane(config_path, out=print, spawn=spawn_start, ready=api_re
         profile = load_profile(config_path)
     except ProfileError as e:
         out(f"configuration error: {e}")
+        if not Path(config_path).exists():
+            out("Looked for ./aiops.toml and ~/.config/aiops/aiops.toml; "
+                "or pass --config PATH (examples: deploy/profiles/).")
         return 2, None
     state_path = Path(profile["control_plane"]["state_file"])
     log = log_path(profile)
@@ -142,7 +145,8 @@ def main(argv, out=print, tui_exec=None, ensure=None, isatty=None):
     import argparse
     from aiops.cli import TUI_BUILD, _tui_binary
     parser = argparse.ArgumentParser(prog="aiops")
-    parser.add_argument("--config", default="aiops.toml", help="runtime profile (TOML)")
+    parser.add_argument("--config", default=default_config_path(),
+                        help="runtime profile (TOML); default ./aiops.toml, else ~/.config/aiops/aiops.toml")
     args = parser.parse_args(argv)
 
     interactive = isatty() if isatty else sys.stdin.isatty() and sys.stdout.isatty()

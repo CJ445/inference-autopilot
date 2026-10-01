@@ -265,3 +265,27 @@ def test_aiops_needs_a_terminal(monkeypatch):
     assert launcher.main([], out=out, isatty=lambda: False,
                          ensure=lambda c, out: pytest.fail("no terminal")) == 2
     assert "not a terminal" in out.text and "aiops start" in out.text
+
+
+# --- where the configuration comes from -------------------------------------------------------------
+
+def test_the_default_config_is_local_then_the_users_config_dir_then_the_local_name(
+        tmp_path, monkeypatch):
+    from aiops.profile import default_config_path
+    monkeypatch.chdir(tmp_path)
+    env = {"XDG_CONFIG_HOME": str(tmp_path / "xdg")}
+    assert default_config_path(env) == "aiops.toml"                      # nothing exists
+    user = tmp_path / "xdg" / "aiops" / "aiops.toml"
+    user.parent.mkdir(parents=True)
+    user.write_text("")
+    assert default_config_path(env) == str(user)                         # the user's config
+    (tmp_path / "aiops.toml").write_text("")
+    assert default_config_path(env) == "aiops.toml"                      # ./aiops.toml wins
+
+
+def test_a_missing_default_config_says_where_it_looked(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    out = Out()
+    code, _ = launcher.ensure_control_plane("aiops.toml", out=out)
+    assert code == 2 and "configuration error" in out.text
+    assert "~/.config/aiops/aiops.toml" in out.text and "--config" in out.text

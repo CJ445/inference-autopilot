@@ -3,6 +3,7 @@
 A profile names ONE managed workload. There is no discovery and no way to name a second
 container; every unknown section or key is an error.
 """
+import os
 import re
 import tomllib
 from pathlib import Path
@@ -20,6 +21,19 @@ GPU_UUID = re.compile(r"GPU-[0-9a-fA-F-]{8,}")
 
 class ProfileError(Exception):
     pass
+
+
+def default_config_path(environ=os.environ):
+    """`./aiops.toml` if it exists, else the user's `~/.config/aiops/aiops.toml` if that exists.
+
+    Otherwise `aiops.toml`, so the error names the file an operator would naturally create.
+    `--config` always wins; nothing is searched anywhere else.
+    """
+    if Path("aiops.toml").exists():
+        return "aiops.toml"
+    base = environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    user = Path(base) / "aiops" / "aiops.toml"
+    return str(user) if user.exists() else "aiops.toml"
 
 
 def _int(lo, hi):
