@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from aiops.audit import AuditLog
 from aiops.detector import detect_gpu_memory_pressure, detect_inference_unresponsive
 from aiops.incident import Incident
+from aiops.kubectl import ClusterError
 from aiops.prometheus import TelemetryError
 from aiops.rca import diagnose
 from aiops.remediate import execute, propose
@@ -28,8 +29,10 @@ class WorkloadBusy(Exception):
 class Engine:
     """One tick: observe -> detect -> incident -> evidence -> RCA -> pending proposal."""
 
-    def __init__(self, telemetry, cluster, config, store=None):
+    def __init__(self, telemetry, cluster, config, store=None, presence=None):
         self.telemetry, self.cluster, self.config, self.store = telemetry, cluster, config, store
+        self.presence = presence      # optional read-only "is the workload there?" (docker only)
+        self.workload_state = None    # 'absent'|'stopped'|'starting'|'running'|'unknown'|None
         self.incidents, self.pending = [], {}
         self.audit, self.health = AuditLog(), "HEALTHY"
         self.last_observation, self.last_observed_at = None, None
@@ -65,7 +68,22 @@ class Engine:
             undo()
             raise
 
+    def _workload_state(self):
+        if self.presence is None:
+            return None
+        try:
+            return self.presence()
+        except ClusterError:
+            return "unknown"          # ambiguous/mismatched/docker down: not "absent"; fail closed below
+
     def tick(self):
+        self.workload_state = self._workload_state()
+        if self.workload_state in ("absent", "stopped"):
+            # The workload is operator-controlled and not there: nothing to observe, detect or
+            # remediate. No incident, no proposal, and no stale reading kept as if it were current.
+            self.health = "HEALTHY"
+            self.last_observation = self.last_observed_at = None
+            return None
         try:
             observed = self.telemetry.metrics()
         except TelemetryError:
@@ -74,6 +92,11 @@ class Engine:
         self.health = "HEALTHY"
         self.last_observation = observed
         self.last_observed_at = datetime.now(timezone.utc).isoformat()
+        if self.workload_state == "starting":
+            # Inside Docker's own start period (the model is loading): observed and shown, but
+            # not yet expected to answer, so a failing probe is not an incident. Detection resumes
+            # the moment Docker reports it healthy or unhealthy.
+            return None
 
         category = self._detect(observed)
         self._clear_gone_conditions(category)

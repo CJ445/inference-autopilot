@@ -16,6 +16,13 @@ def aiops(*args, launcher=False, timeout=60):
                           cwd=ROOT)
 
 
+def blocked_config(tmp_path):
+    """A profile whose GPU pin cannot match: a BLOCKING prerequisite fails on any machine
+    (no GPU at all, or a different one). A missing workload no longer blocks start."""
+    return write(tmp_path, DOCKER.replace("GPU-1e5dd8d1-7112-3d8d-c5cc-4f56f97fa24f",
+                                          "GPU-00000000-0000-0000-0000-000000000000"))
+
+
 def valid_config(tmp_path, workload=None):
     text = DOCKER
     if workload:
@@ -59,15 +66,15 @@ def test_stop_is_safe_when_nothing_is_running(tmp_path):
 
 
 def test_start_refuses_and_leaves_nothing_behind_when_the_real_doctor_fails(tmp_path):
-    cfg = valid_config(tmp_path, workload=f"aiops-nonexistent-{uuid.uuid4().hex[:8]}")
+    cfg = blocked_config(tmp_path)
     r = aiops("start", "--config", str(cfg))
     assert r.returncode == 1 and "refusing to start" in r.stdout
-    assert "workload" in r.stdout                       # the failing prerequisite is named
+    assert "gpu" in r.stdout.lower()                    # the failing prerequisite is named
     assert not (tmp_path / "run").exists() and not (tmp_path / "data").exists()
 
 
 def test_doctor_json_output_has_the_documented_shape_and_exit_code_reflects_failures(tmp_path):
-    cfg = valid_config(tmp_path, workload=f"aiops-nonexistent-{uuid.uuid4().hex[:8]}")
+    cfg = blocked_config(tmp_path)
     r = aiops("doctor", "--config", str(cfg), "--json")
     results = json.loads(r.stdout)
     assert {x["check"] for x in results} >= {"python", "database", "workload", "gpu"}

@@ -20,6 +20,10 @@ RESTART_GRACE_SECONDS = 30
 COMMAND_TIMEOUT_SECONDS = 60
 
 
+class WorkloadAbsent(ClusterError):
+    """No container carries this workload's labels. The operator provisions it; nothing here does."""
+
+
 class DockerProvider:
     """Bound at construction to ONE explicitly configured workload; any other name is refused."""
 
@@ -52,7 +56,7 @@ class DockerProvider:
         if not all(SHORT_ID.fullmatch(i) for i in ids):
             raise ClusterError("unexpected container id from docker")
         if not ids:
-            raise ClusterError(f"no managed workload named {name!r}")
+            raise WorkloadAbsent(f"no managed workload named {name!r}")
         if len(ids) > 1:
             raise ClusterError(f"ambiguous: {len(ids)} managed containers named {name!r}")
         return ids[0]
@@ -76,3 +80,19 @@ class DockerProvider:
                              timeout=COMMAND_TIMEOUT_SECONDS).stdout
         except (OSError, subprocess.SubprocessError) as e:
             raise ClusterError(f"docker unavailable or failed: {getattr(e, 'stderr', None) or e}") from e
+
+
+def workload_presence(provider, name):
+    """'absent', 'stopped', 'starting' or 'running' (a paused container is running). Read-only: the provider's
+    own label and identity checks, and no new capability on the provider itself. Ambiguity or an
+    identity mismatch still raises ClusterError."""
+    try:
+        container = provider._inspect(provider._resolve(name), name)
+    except WorkloadAbsent:
+        return "absent"
+    state = container["State"]
+    if not state["Running"]:
+        return "stopped"
+    # Docker's own health check says the container is still inside its start period (the model is
+    # loading): it is running but cannot be expected to answer yet.
+    return "starting" if state.get("Health", {}).get("Status") == "starting" else "running"

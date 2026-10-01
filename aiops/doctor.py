@@ -12,7 +12,7 @@ import sys
 import urllib.request
 from pathlib import Path
 
-from aiops.docker import MANAGED_LABEL, WORKLOAD_LABEL, DockerProvider
+from aiops.docker import MANAGED_LABEL, WORKLOAD_LABEL, DockerProvider, WorkloadAbsent
 from aiops.gpu import read_gpu
 from aiops.kubectl import ClusterError, KubernetesProvider
 from aiops.prometheus import PrometheusAdapter, TelemetryError
@@ -86,6 +86,8 @@ def _version(text):
 
 
 class _Doctor:
+    no_workload = False                      # set by `workload` when no container carries the labels
+
     def __init__(self, profile, run, which):
         self.p, self.run, self.which = profile, run, which
         self.w, self.safety = profile["workload"], profile["safety"]
@@ -208,6 +210,12 @@ class _Doctor:
     def workload(self):
         try:
             state = DockerProvider(self.w["name"], run=self.run).get_workload(self.w["name"])
+        except WorkloadAbsent as e:
+            # Not a prerequisite: the operator provisions the workload when they want one, and the
+            # control plane must run (and show that) without it. Ambiguity or a label/identity
+            # mismatch below is still a blocking FAIL.
+            self.no_workload = True
+            return WARN, f"{e}; the operator provisions it (not required to start)"
         except ClusterError as e:
             return FAIL, str(e)
         who = f"managed container {self.w['name']!r} identified ({state['id'][:19]}...)"
@@ -303,6 +311,8 @@ class _Doctor:
                       f"RAM {ram:.0f}% are within the configured limits")
 
     def vllm_endpoint(self):
+        if self.no_workload:
+            return NOT_APPLICABLE, "managed workload not found (see the workload check)"
         try:
             with urllib.request.urlopen(self.w["vllm_url"] + "/health", timeout=3) as r:
                 return PASS, f"{self.w['vllm_url']}/health answered {r.status}"
@@ -313,12 +323,16 @@ class _Doctor:
         return VllmClient(self.w["vllm_url"], self.w["model"], timeout=3)
 
     def vllm_metrics(self):
+        if self.no_workload:
+            return NOT_APPLICABLE, "managed workload not found (see the workload check)"
         try:
             return PASS, f"{len(self._vllm().metrics())} vLLM signals readable"
         except TelemetryError as e:
             return FAIL, str(e)
 
     def vllm_probe(self):
+        if self.no_workload:
+            return NOT_APPLICABLE, "managed workload not found (see the workload check)"
         p = self._vllm().probe()
         return (PASS, f"real completion in {p['latency_ms']:.0f} ms") if p["ok"] else (
             FAIL, f"inference probe failed: {p['error']}")

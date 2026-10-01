@@ -117,6 +117,9 @@ def make_server(engine, host="127.0.0.1", port=8080, lock=None, info=None, statu
                         "audit": {"valid": engine.audit.verify(),
                                   "events": len(engine.audit.events)},
                         "info": info or {}}
+                if engine.workload_state is not None:      # only where the engine can tell
+                    body["workload"] = {"name": engine.config.get("workload"),
+                                        "state": engine.workload_state}
                 if status_extra is not None:
                     try:
                         body.update(status_extra())

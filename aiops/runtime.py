@@ -3,7 +3,7 @@ import functools
 import subprocess
 from pathlib import Path
 
-from aiops.docker import DockerProvider
+from aiops.docker import DockerProvider, workload_presence
 from aiops.engine import Engine
 from aiops.gpu import read_gpu
 from aiops.kubectl import KubernetesProvider
@@ -31,11 +31,13 @@ def build_engine(profile, run=subprocess.run):
     db.parent.mkdir(parents=True, exist_ok=True)  # the profile's own state directory
     store = Store(db)
 
+    presence = None
     if profile["provider"] == "docker":
         telemetry = RealTelemetry(
             functools.partial(read_gpu, run=run, gpu_index=profile["gpu"]["index"]),
             VllmClient(w["vllm_url"], w["model"], timeout=VLLM_TIMEOUT_SECONDS))
         provider = DockerProvider(w["name"], run=run)
+        presence = functools.partial(workload_presence, provider, w["name"])
         config.update(stable_probes=ver["stable_probes"], probe_interval=ver["probe_interval"])
     elif profile["provider"] == "kubernetes":
         telemetry = PrometheusAdapter(w["prometheus_url"], QUERIES)
@@ -44,4 +46,4 @@ def build_engine(profile, run=subprocess.run):
         config["error_rate_limit"] = safety["error_rate_limit"]
     else:
         raise ValueError(f"unknown provider {profile['provider']!r}")
-    return Engine(telemetry, provider, config, store=store)
+    return Engine(telemetry, provider, config, store=store, presence=presence)

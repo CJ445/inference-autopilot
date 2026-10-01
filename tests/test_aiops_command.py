@@ -8,12 +8,11 @@ import subprocess
 import sys
 import termios
 import time
-import uuid
 from pathlib import Path
 
 import pytest
 from term_screen import VScreen
-from test_cli import valid_config
+from test_cli import blocked_config
 from test_launcher import plane, state_of  # noqa: F401  (the detached control-plane fixture)
 
 from aiops import lifecycle
@@ -102,7 +101,7 @@ def test_aiops_attaches_to_a_running_control_plane_opens_the_tui_and_leaves_it_r
 
 def test_aiops_that_cannot_start_the_control_plane_says_why_and_never_opens_the_tui(
         tmp_path, tui_bin):
-    cfg = valid_config(tmp_path, workload=f"aiops-nonexistent-{uuid.uuid4().hex[:8]}")
+    cfg = blocked_config(tmp_path)
     t = Pty([str(ROOT / "bin" / "aiops"), "--config", str(cfg)], env_for(tui_bin))
     try:
         assert t.wait_screen("Control plane could not be started", timeout=60)

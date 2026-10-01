@@ -359,6 +359,16 @@ fn no_data(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
+/// The workload as the server reports it: `None` where the server does not say.
+fn workload_state(app: &App) -> Option<&str> {
+    app.snapshot.as_ref()?.status.workload.as_ref().map(|w| w.state.as_str())
+}
+
+/// True when the managed workload is not there to observe (absent or stopped).
+fn no_workload(app: &App) -> bool {
+    matches!(workload_state(app), Some("absent" | "stopped"))
+}
+
 fn observation(app: &App) -> Option<&Obj> {
     app.snapshot.as_ref()?.status.last_observation.as_ref()
 }
@@ -388,6 +398,9 @@ fn headline(app: &App, w: usize) -> Vec<Line<'static>> {
     let workload = info.and_then(|i| i.workload.clone()).filter(|wl| Some(wl) != name.as_ref());
     let o = observation(app);
     let state = match o.and_then(|o| flag(o, "inference_probe_ok")) {
+        _ if workload_state(app) == Some("absent") => muted("○ NO WORKLOAD"),
+        _ if workload_state(app) == Some("stopped") => muted("○ STOPPED"),
+        _ if workload_state(app) == Some("starting") => span("◔ STARTING", WARNING),
         Some(true) => bold("● HEALTHY", HEALTHY),
         Some(false) => bold("✗ UNRESPONSIVE", CRITICAL),
         None => muted("N/A"),
@@ -447,6 +460,14 @@ fn provenance(app: &App) -> Span<'static> {
 }
 
 fn inference_section(app: &App, w: usize) -> Vec<Line<'static>> {
+    if no_workload(app) {
+        let what = if workload_state(app) == Some("stopped") { "Workload stopped" } else { "No workload running" };
+        return vec![
+            rule("Inference", None, w),
+            Line::from(vec![plain(" "), bold(what, theme::TEXT), muted(": nothing is observed.")]),
+            Line::from(muted(" Start the managed container and it is picked up automatically.")),
+        ];
+    }
     let o = observation(app);
     let probe = match o.and_then(|o| flag(o, "inference_probe_ok")) {
         Some(true) => {
@@ -996,6 +1017,15 @@ fn control_plane(f: &mut Frame, area: Rect, app: &App) {
             None if label == "Model" => {}
             None => l.push(kv(label, vec![muted("N/A")])),
         }
+    }
+    if let Some(state) = workload_state(app) {
+        l.push(kv("Workload state", vec![match state {
+            "running" => span("● running", HEALTHY),
+            "stopped" => muted("○ stopped (Workload stopped)"),
+            "starting" => span("◔ starting (in its start period)", WARNING),
+            "absent" => muted("○ No workload running"),
+            _ => span("? unknown (ambiguous or unreadable)", WARNING),
+        }]));
     }
     let wd = snap.and_then(|s| s.status.watchdog.as_ref());
     let (badge, detail) = watchdog_badge(wd);

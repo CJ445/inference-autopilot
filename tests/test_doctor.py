@@ -134,11 +134,16 @@ def test_every_result_has_the_documented_shape(tmp_path, vllm_server):
 
 # --- the managed workload ---------------------------------------------------------------
 
-def test_a_missing_managed_workload_fails_and_blocks(tmp_path, vllm_server):
-    r = doctor(docker_profile(tmp_path, vllm_server.url), System(ids=""))
-    assert r["workload"]["status"] == FAIL and "no managed workload" in r["workload"]["detail"]
-    assert r["workload"]["blocking"] is True
-    assert r["cuda_compat"]["status"] == NOT_APPLICABLE
+def test_a_missing_managed_workload_is_a_warning_and_does_not_block(tmp_path, vllm_server):
+    """The operator provisions the workload when they want one; `aiops` must run without it."""
+    results = doctor(docker_profile(tmp_path, vllm_server.url), System(ids=""))
+    r = results
+    assert r["workload"]["status"] == WARN and "no managed workload" in r["workload"]["detail"]
+    assert "not required to start" in r["workload"]["detail"]
+    assert blocking_failures(results.values()) == []
+    # nothing about the (absent) workload is reported as healthy or as a separate failure
+    for name in ("cuda_compat", "vllm_endpoint", "vllm_metrics", "vllm_probe"):
+        assert r[name]["status"] == NOT_APPLICABLE and "workload not found" in r[name]["detail"], name
 
 
 def test_an_ambiguous_workload_fails_and_blocks(tmp_path, vllm_server):

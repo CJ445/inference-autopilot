@@ -67,9 +67,6 @@ def _fail(out, reason, log, hint="aiops doctor", show_tail=True):
         out(f"\nLast output ({log}):")
         for line in lines:
             out(f"  {line}")
-    if "no managed workload" in "".join(_tail(log, 40)):
-        out("\nThe managed workload (the vLLM container) must already exist: the control plane "
-            "never creates it.\nSee README: \"Provision the vLLM container\".")
     out(f"\nRun diagnostics with:\n  {hint}")
     return 1
 

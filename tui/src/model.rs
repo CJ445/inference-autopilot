@@ -23,6 +23,17 @@ pub struct Status {
     pub watchdog: Option<Watchdog>,
     #[serde(default)]
     pub extra_error: Option<String>,
+    /// Whether the managed workload exists (only reported where the control plane can tell).
+    #[serde(default)]
+    pub workload: Option<WorkloadState>,
+}
+
+/// `absent` | `stopped` | `running` | `unknown`, exactly as the server reports it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkloadState {
+    #[serde(default)]
+    pub name: Option<String>,
+    pub state: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

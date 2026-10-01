@@ -485,3 +485,32 @@ def test_stopping_the_control_plane_from_the_tui_needs_confirmation_and_asks_the
     assert cp.stop_requested.wait(10)                  # the SERVER was asked, through its API
     assert t.wait_screen("stop requested")
     assert cp.world.restarts == 0                      # no workload was touched
+
+
+def test_the_tui_follows_the_workload_appearing_stopping_and_disappearing(term, tui_bin):
+    holder = {"state": "absent"}
+    plane = ControlPlane(fault=False)
+    plane.engine.presence = lambda: holder["state"]
+    plane.start()
+    try:
+        t = term(plane.url)
+        assert t.wait_screen("● CONTROL ONLINE")
+        assert t.wait_screen("No workload running") and t.wait_screen("○ NO WORKLOAD")
+        assert "✗ UNRESPONSIVE" not in t.screen() and "Probe" not in t.screen()
+        assert plane.api("/api/v1/status")["workload"]["state"] == "absent"
+
+        holder["state"] = "running"                      # the operator starts the workload
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and "No workload running" in t.screen():
+            t.pump(0.2)
+        assert "No workload running" not in t.screen() and t.wait_screen("Observed")
+
+        holder["state"] = "stopped"                      # ... stops it
+        assert t.wait_screen("○ STOPPED") and t.wait_screen("Workload stopped")
+        holder["state"] = "absent"                       # ... removes it
+        assert t.wait_screen("○ NO WORKLOAD") and t.wait_screen("No workload running")
+        assert plane.world.restarts == 0                 # no remediation ever had anything to act on
+        t.send(b"q")
+        assert t.proc.wait(timeout=10) == 0
+    finally:
+        plane.stop()

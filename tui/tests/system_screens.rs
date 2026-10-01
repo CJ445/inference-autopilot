@@ -425,3 +425,111 @@ fn the_state_chips_use_the_semantic_palette() {
     assert_eq!(find("● FAIL"), theme::CRITICAL);
     assert_eq!(find("○ NOT_APPLICABLE"), theme::TEXT_MUTED);
 }
+
+// --- no workload: the control plane runs with zero workloads ---------------------------------------------
+
+fn with_workload(state: Option<&str>, observation: bool) -> App {
+    let mut st: Status = serde_json::from_str(HEALTHY).unwrap();
+    st.workload = state.map(|s| serde_json::from_value(serde_json::json!({"name": "vllm", "state": s})).unwrap());
+    if !observation {
+        st.last_observation = None;
+        st.last_observed_at = None;
+    }
+    let mut a = App::new("http://127.0.0.1:8080".into());
+    a.wall = 1_790_866_932.0;
+    a.apply(Msg::Poll(Ok(Snapshot::new(st, vec![]))));
+    a
+}
+
+#[test]
+fn an_absent_workload_says_so_and_shows_no_workload_telemetry() {
+    let s = screen(&with_workload(Some("absent"), false));
+    for needle in ["○ NO WORKLOAD", "No workload running", "nothing is observed", "picked up automatically",
+                   "● CONTROL ONLINE", "No active incidents", "No observation"] {
+        has(&s, needle);
+    }
+    for invented in ["● HEALTHY", "✗ UNRESPONSIVE", "Probe", "Metrics", "KV cache", "Running 0", "35.4%"] {
+        lacks(&s, invented);
+    }
+}
+
+#[test]
+fn a_stopped_workload_is_shown_as_stopped_not_unresponsive() {
+    let s = screen(&with_workload(Some("stopped"), false));
+    for needle in ["○ STOPPED", "Workload stopped"] {
+        has(&s, needle);
+    }
+    for invented in ["● HEALTHY", "✗ UNRESPONSIVE", "Probe"] {
+        lacks(&s, invented);
+    }
+}
+
+#[test]
+fn a_running_workload_shows_its_telemetry_as_before() {
+    let s = screen(&with_workload(Some("running"), true));
+    for needle in ["● HEALTHY", "Probe ✓", "Metrics ✓", "35.4%", "Observed"] {
+        has(&s, needle);
+    }
+    lacks(&s, "No workload running");
+}
+
+#[test]
+fn a_server_that_does_not_report_the_workload_changes_nothing() {
+    let s = screen(&with_workload(None, true));
+    has(&s, "● HEALTHY");
+    lacks(&s, "NO WORKLOAD");
+}
+
+#[test]
+fn the_view_follows_the_workload_as_it_appears_and_disappears() {
+    let mut a = with_workload(Some("absent"), false);
+    has(&screen(&a), "No workload running");
+    let running: Status = {
+        let mut st: Status = serde_json::from_str(HEALTHY).unwrap();
+        st.workload = Some(serde_json::from_value(serde_json::json!({"name": "vllm", "state": "running"})).unwrap());
+        st
+    };
+    a.apply(Msg::Poll(Ok(Snapshot::new(running, vec![]))));
+    let s = screen(&a);
+    has(&s, "Probe ✓");
+    lacks(&s, "No workload running");
+    let gone: Status = {
+        let mut st: Status = serde_json::from_str(HEALTHY).unwrap();
+        st.workload = Some(serde_json::from_value(serde_json::json!({"name": "vllm", "state": "absent"})).unwrap());
+        st.last_observation = None;
+        st.last_observed_at = None;
+        st
+    };
+    a.apply(Msg::Poll(Ok(Snapshot::new(gone, vec![]))));
+    let s = screen(&a);
+    has(&s, "No workload running");
+    lacks(&s, "Probe ✓");
+}
+
+#[test]
+fn the_control_plane_screen_shows_the_workload_state() {
+    for (state, needle) in [("absent", "No workload running"), ("stopped", "Workload stopped"),
+                            ("running", "● running"), ("unknown", "unknown")] {
+        let mut a = with_workload(Some(state), state == "running");
+        a.handle_key(key('4'));
+        has(&screen(&a), needle);
+    }
+}
+
+#[test]
+fn a_workload_in_its_start_period_shows_as_starting_not_unresponsive() {
+    let mut a = with_workload(Some("starting"), true);
+    {
+        // the model is still loading: the probe fails, and that is not what the operator is told
+        let mut st: Status = serde_json::from_str(HEALTHY).unwrap();
+        st.workload = Some(serde_json::from_value(serde_json::json!({"name": "vllm", "state": "starting"})).unwrap());
+        st.last_observation.as_mut().unwrap().insert("inference_probe_ok".into(), false.into());
+        st.last_observation.as_mut().unwrap().insert("inference_probe_error".into(), "refused".into());
+        a.apply(Msg::Poll(Ok(Snapshot::new(st, vec![]))));
+    }
+    let s = screen(&a);
+    has(&s, "◔ STARTING");
+    lacks(&s, "✗ UNRESPONSIVE");
+    a.handle_key(key('4'));
+    has(&screen(&a), "◔ starting");
+}

@@ -72,10 +72,14 @@ Relative paths in a profile (`db`, `state_file`) resolve next to the profile fil
 and the startup log live in `~/.config/aiops/`. Other examples are in `deploy/profiles/`. A
 profile names exactly one managed workload; unknown keys are errors.
 
-### 5. Provision the vLLM container (docker-real-gpu profile)
+### 5. The vLLM container (optional, operator-controlled)
 
-The control plane manages exactly one container and **never creates, pulls, starts or stops
-it** (ADR-021); `aiops` refuses to start while it is missing. Create it once, for example:
+`aiops` never needs a workload to start. The control plane and TUI run with **zero** workloads;
+the TUI shows `No workload running` and no workload telemetry. The managed container is entirely
+yours: `aiops` never creates, pulls, starts, stops or restarts it (ADR-021). The control plane
+notices it by its labels, so when you start a correctly labelled container its telemetry appears,
+and when you stop or remove it the TUI returns to the unavailable state. (Remediation only ever
+acts on that one container, through an approved incident.) Create one, for example:
 
     docker run -d --name aiops-vllm --gpus device=0 \
       --label com.inference-autopilot.managed=true \
@@ -88,9 +92,15 @@ it** (ADR-021); `aiops` refuses to start while it is missing. Create it once, fo
       --gpu-memory-utilization 0.35 --max-model-len 512 --enforce-eager
 
 The label value (`workload=vllm`) must equal `[workload] name` in the profile; the container
-name does not matter. Give it a minute or two to load the model (`docker ps` shows `healthy`),
-check with `aiops doctor`, then run `aiops`. Use no Docker restart policy: the project is never
-a permanent background service.
+name does not matter. Give it a minute or two to load the model (`docker ps` shows `healthy`;
+while Docker reports it `starting`, a failing probe is shown but not treated as an incident).
+Use no Docker restart policy: the project is never a permanent background service.
+
+Missing, stopped and absent are not prerequisites, but a labelling problem still is:
+two containers with the labels, or a container whose labels do not match, blocks start. A
+workload that is running and does not answer is an incident, as before. A graceful
+`docker stop` looks like a hang for a few seconds, so it can open an incident that stays pending
+until you reject it.
 
 ## Using it
 
@@ -102,8 +112,8 @@ That is the normal way in. It looks for a running control plane for the profile:
 * **not running** → runs the existing `aiops start` detached (its own session, output in
   `<state_file>.log`), shows the lifecycle's own startup lines, waits until the API answers,
   then opens the TUI.
-* **cannot start** (a blocking prerequisite failed, the watchdog could not arm, the port is
-  taken, the state file is unreadable, or it did not answer in time) → prints the reason and
+* **cannot start** (a blocking prerequisite failed, such as an unreadable GPU or a Docker
+  daemon that is down; the watchdog could not arm; the port is taken; the state file is unreadable, or it did not answer in time) → prints the reason and
   the last lines of its output and exits non-zero. The TUI is not opened over a broken start.
 
 Quitting the TUI (`Q`) leaves the control plane running. To stop it, use the TUI's *Control
