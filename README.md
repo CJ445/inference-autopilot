@@ -140,6 +140,31 @@ The explicit commands remain for scripts and debugging:
     aiops doctor     # read-only prerequisite check
     aiops tui        # attach the TUI only; never starts a control plane
 
+## Try the failure loop safely (SIMULATION)
+
+    aiops demo --approve        # or --reject; with neither, it asks when run in a terminal
+
+This runs the **real** control loop (the same engine, detector, evidence, deterministic RCA,
+proposal, policy, approval, verification and hash-chained audit) over a **synthetic, in-memory
+workload**. It needs no config, no GPU, no Docker and no container, and it cannot touch any of
+them: the simulation package may not import anything that reaches Docker, NVIDIA, a subprocess or
+the network (a test enforces it, and another runs the whole scenario with those doors patched
+shut). Every audit event, incident and piece of evidence is marked `SIMULATION`
+(`source_type: simulation`, sources `simulated-*`), and a simulation database cannot be opened by
+the real store or the reverse.
+
+The scenario, `model-unresponsive-recovery`:
+
+    the model answers -> fault injected -> 1st failed probe (no incident yet) ->
+    2nd consecutive failed probe -> incident -> evidence -> root cause -> restart proposal ->
+    policy: approval required -> your decision -> simulated restart (lifecycle generation 1 -> 2) ->
+    verification from the observed state (identity changed, GPU and metrics readable, 3 successful
+    completions in a row) -> RESOLVED -> audit chain intact
+
+A restart that does not bring the model back is `UNRESOLVED`, never `RESOLVED`. Simulation is also
+the portable test harness: no GPU or Docker is needed to run it in CI. It cannot prove anything
+about your real hardware; the real golden scenario below does.
+
 ## Development
 
     cargo build --manifest-path tui/Cargo.toml     # debug build of the TUI

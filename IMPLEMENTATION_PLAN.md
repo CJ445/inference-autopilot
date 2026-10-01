@@ -1,6 +1,6 @@
 # Implementation plan: simulation, golden scenarios, operator UX
 
-Status: Phase 0 (audit) complete. Phase 1 in progress. Decisions and disagreements with the brief
+Status: Phase 0 (audit) and Phase 1 (simulation engine and golden scenario) complete; Phase 2 next. Decisions and disagreements with the brief
 are in `DECISIONS.md`. The authority for behaviour is `PRD.md` (ADR-021 … ADR-027 are the most
 relevant).
 
