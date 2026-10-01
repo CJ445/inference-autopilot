@@ -73,15 +73,15 @@ fn colour_of(buf: &Buffer, needle: &str) -> Color {
 
 #[test]
 fn a_healthy_dashboard_shows_real_gpu_vllm_control_plane_and_safety_state() {
-    let a = app(HEALTHY, vec![]);
+    let a = app(HEALTHY, vec![]);       // `app` renders the technical view (D)
     let s = text(&a, 110, 32);
     for needle in [
         "INFERENCE AUTOPILOT", "● CONTROL ONLINE", "docker-real-gpu", "GPU 0", "GPU-1e5dd8d1", "VRAM",
         "35.4%", "2.8 / 8.0 GiB", "59°C", "UTIL 23%", "vLLM · facebook/opt-125m", "● HEALTHY",
         "Probe ✓", "18 ms", "Metrics ✓", "KV cache 0.0%", "Running 0", "Waiting 0",
         "No active incidents", "WATCHDOG", "● ARMED", "Identity ✓", "Budgets ✓",
-        "AUDIT ✓ VERIFIED", "Observed 1.0s ago", "OVERVIEW", "INCIDENTS", "AUDIT",
-        "Navigate", "Approve", "Reject", "Quit",
+        "AUDIT ✓ VERIFIED", "Observed 1.0s ago", "1 Home", "2 Incidents", "3 Lab", "4 Activity", "5 System",
+        "Review", "Quit",
     ] {
         has(&s, needle);
     }
@@ -293,10 +293,10 @@ fn approval_is_confirmed_with_the_incident_the_reason_and_the_effect() {
     let mut a = detail_app(PENDING);                       // review the incident first
     ch(&mut a, 'a');
     let s = text(&a, 110, 40);
-    for needle in ["Approve: Restart the model server?", "Incident", "inc_001", "Your model stopped answering", "Workload", "vllm",
-                   "Why", "Inference requests are failing or timing out", "Effect",
-                   "Restarts the workload", "no rollback",
-                   "[Enter] Confirm", "[Esc] Cancel"] {
+    for needle in ["RECOVERY REQUEST", "inc_001", "Your model stopped answering", "workload vllm",
+                   "Inference requests are failing or timing out", "Evidence", "A test request to the model did not complete in time.",
+                   "Proposed", "Restart the model server", "no rollback", "allowlisted and runs only after you approve",
+                   "[Enter] Approve", "[Esc] Cancel"] {
         has(&s, needle);
     }
 }
@@ -305,9 +305,9 @@ fn approval_is_confirmed_with_the_incident_the_reason_and_the_effect() {
 fn the_confirm_key_looks_inactive_until_the_guard_has_elapsed() {
     let mut a = detail_app(PENDING);
     ch(&mut a, 'a');
-    assert_eq!(colour_of(&ui::render_to_buffer(&a, 110, 40), "[Enter] Confirm"), theme::TEXT_MUTED);
+    assert_eq!(colour_of(&ui::render_to_buffer(&a, 110, 40), "[Enter] Approve"), theme::TEXT_MUTED);
     a.now += std::time::Duration::from_millis(600);
-    assert_eq!(colour_of(&ui::render_to_buffer(&a, 110, 40), "[Enter] Confirm"), theme::ACCENT);
+    assert_eq!(colour_of(&ui::render_to_buffer(&a, 110, 40), "[Enter] Approve"), theme::ACCENT);
 }
 
 #[test]
@@ -315,9 +315,10 @@ fn rejection_has_its_own_clearly_labelled_confirmation() {
     let mut a = detail_app(PENDING);
     ch(&mut a, 'r');
     let s = text(&a, 110, 40);
-    has(&s, "Reject: Restart the model server?");
-    has(&s, "No action is taken on the workload");
-    lacks(&s, "Approve: Restart the model server?");
+    has(&s, "DECLINE THIS RECOVERY");
+    has(&s, "[Enter] Decline");
+    has(&s, "No action is taken; the proposal is closed.");
+    lacks(&s, "RECOVERY REQUEST");
     lacks(&s, "no rollback");
 }
 
@@ -458,7 +459,7 @@ fn the_audit_screen_lists_events_and_the_integrity_banner() {
     let mut snap = Snapshot::new(status(HEALTHY), vec![]);
     snap.audit = Some(serde_json::from_str::<Audit>(AUDIT).unwrap());
     let mut a = app_with(snap);
-    ch(&mut a, '3');
+    ch(&mut a, '4');
     let s = text(&a, 110, 30);
     for needle in ["AUDIT ✓ VERIFIED", "incident_created", "rca_generated", "remediation_proposed",
                    "policy_evaluated", "a1b2c3d4e5f6"] {
@@ -471,7 +472,7 @@ fn the_audit_screen_does_not_hide_an_integrity_failure() {
     let mut snap = Snapshot::new(status(HEALTHY), vec![]);
     snap.audit = Some(serde_json::from_str::<Audit>(AUDIT_INVALID).unwrap());
     let mut a = app_with(snap);
-    ch(&mut a, '3');
+    ch(&mut a, '4');
     has(&text(&a, 110, 30), "AUDIT ✗ INTEGRITY FAILURE");
 }
 
@@ -583,7 +584,8 @@ fn the_footer_never_drops_quit_even_in_a_narrow_terminal() {
 fn a_and_r_are_visibly_inactive_unless_the_selected_incident_awaits_a_decision() {
     let key_colour = |a: &App, k: &str| colour_of(&ui::render_to_buffer(a, 110, 32), k);
     let mut waiting = app(UNRESPONSIVE, vec![incident(PENDING, "inc_001")]);
-    assert_eq!(key_colour(&waiting, "A Approve"), theme::TEXT_MUTED, "not live on the list screens");
+    // only the keys that work on a screen are listed: the lists do not offer Approve at all
+    assert!(!text(&waiting, 110, 32).lines().last().unwrap().contains("Approve"), "not offered on the list screens");
     key(&mut waiting, KeyCode::Enter);                 // on the incident's own page it is live
     let mut resolved = app(HEALTHY, vec![incident(RESOLVED, "inc_001")]);
     key(&mut resolved, KeyCode::Enter);

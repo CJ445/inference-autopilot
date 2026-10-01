@@ -33,7 +33,7 @@ fn every_view(theme: Theme) -> Vec<(String, ratatui::buffer::Buffer)> {
     let mut out = Vec::new();
     for details in [false, true] {
         a.details = details;
-        for k in "1234?".chars() {
+        for k in "12345?".chars() {
             a.handle_key(key(k));
             out.push((format!("{k} details={details}"), ui::render_to_buffer(&a, 130, 60)));
         }
@@ -58,7 +58,7 @@ fn mono_has_no_colour_anywhere_and_state_is_still_a_word_and_a_glyph() {
     }
     let mut a = app(Theme::Mono);
     let s = ui::render_to_string(&a, 120, 40);
-    for needle in ["A problem needs your OK", "● Needs your OK", "LIVE"] {
+    for needle in ["! NEEDS YOUR OK", "→ Approve", "LIVE"] {
         assert!(s.contains(needle), "{needle}\n{s}");
     }
     // the selected row is marked by a glyph, not a background
@@ -132,7 +132,8 @@ fn stale_values_are_not_dimmed_they_are_labelled() {
 #[test]
 fn an_error_stays_until_a_key_is_pressed_and_a_success_fades() {
     let mut a = app(Theme::Terminal);
-    a.handle_key(key('a'));                       // not on an incident's page: refused with a reason
+    a.handle_key(key('2'));
+    a.handle_key(key('a'));                       // on the Incidents list: refused with a reason
     let err = a.active_notice().expect("an error").clone();
     assert!(err.is_error);
     a.now += NOTICE_TTL * 6;                      // a long time later

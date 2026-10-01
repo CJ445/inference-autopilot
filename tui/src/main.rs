@@ -31,7 +31,7 @@ const DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(120);
 const HELP: &str = "aiops-tui: operator interface for the Inference Autopilot control plane
 
 USAGE: aiops-tui [--url URL] [--interval-ms N] [--timeout-ms N]
-       aiops-tui --once [--screen dashboard|incidents|activity|system|help|detail:ID] [--width N] [--height N] [--details] [--theme NAME]
+       aiops-tui --once [--screen home|incidents|lab|activity|system|help|detail:ID] [--width N] [--height N] [--details] [--theme NAME]
 
   --url URL         control-plane API (loopback http only)   [default http://127.0.0.1:8080]
   --interval-ms N   refresh interval, 250..10000             [default 750]
@@ -185,8 +185,9 @@ fn once(o: &Opts) -> ExitCode {
     app.theme = o.theme.unwrap_or_else(|| Theme::from_env(std::env::var("NO_COLOR").ok().as_deref()));
     app.wall = wall_clock();
     match o.screen.as_str() {
-        "dashboard" => {}
+        "dashboard" | "home" => {}
         "incidents" => app.screen = Screen::Incidents,
+        "lab" => app.screen = Screen::Lab,
         "audit" | "activity" => app.screen = Screen::Audit,
         // the old per-topic names still work: all of them are sections of System now
         "system" | "control" | "settings" | "diagnostics" | "about" => app.screen = Screen::System,
@@ -257,68 +258,71 @@ fn interactive(o: &Opts) -> Result<(), String> {
             if let Ok(mut g) = interest.lock() {
                 *g = app.interest();
             }
+            let mut effects: Vec<Effect> = Vec::new();
             while let Ok(msg) = rx.try_recv() {
                 app.apply(msg);
+                effects.extend(app.take_effects());
             }
             terminal.draw(|f| ui::render(f, &app))?;
             if event::poll(Duration::from_millis(100))? {
                 match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        for effect in app.handle_key(key) {
-                            match effect {
-                                Effect::Quit => break 'ui,
-                                Effect::RefreshNow => {
-                                    let _ = wake_tx.send(());
-                                }
-                                Effect::LoadConfig => {
-                                    spawn_call(&client, Duration::from_secs(5), tx.clone(), |c| Loaded::Config(c.config()))
-                                }
-                                Effect::LoadVersion => {
-                                    spawn_call(&client, Duration::from_secs(5), tx.clone(), |c| Loaded::Version(c.version()))
-                                }
-                                // the doctor reads real infrastructure: it can take a while
-                                Effect::RunDiagnostics => spawn_call(&client, DIAGNOSTICS_TIMEOUT, tx.clone(), |c| {
-                                    Loaded::Diagnostics(c.diagnostics())
-                                }),
-                                // sent exactly once per confirmation; there is no retry anywhere
-                                Effect::StopControlPlane => {
-                                    spawn_call(&client, Duration::from_secs(10), tx.clone(), |c| Loaded::Stop(c.stop_control_plane()))
-                                }
-                                // A REAL fault: sent once, after the operator confirmed the dialog.
-                                Effect::PauseWorkload { target, seconds } => {
-                                    spawn_call(&client, Duration::from_secs(20), tx.clone(), move |c| {
-                                        Loaded::FaultPaused(c.fault_pause(&target, seconds))
-                                    })
-                                }
-                                Effect::ResumeWorkload => {
-                                    spawn_call(&client, Duration::from_secs(20), tx.clone(), |c| {
-                                        Loaded::FaultResumed(c.fault_resume())
-                                    })
-                                }
-                                Effect::StartPractice => spawn_call(&client, Duration::from_secs(10), tx.clone(), |c| {
-                                    Loaded::PracticeStarted(c.practice_start())
-                                }),
-                                Effect::InjectFault => spawn_call(&client, Duration::from_secs(10), tx.clone(), |c| {
-                                    Loaded::PracticeFault(c.practice_fault())
-                                }),
-                                Effect::EndPractice => spawn_call(&client, Duration::from_secs(10), tx.clone(), |c| {
-                                    Loaded::PracticeStopped(c.practice_stop())
-                                }),
-                                // a decision goes to the namespace the operator is looking at
-                                Effect::Approve(id) => {
-                                    let c = if app.practice { client.practice() } else { client.clone() };
-                                    spawn_action(&c, ActionKind::Approve, id, tx.clone())
-                                }
-                                Effect::Reject(id) => {
-                                    let c = if app.practice { client.practice() } else { client.clone() };
-                                    spawn_action(&c, ActionKind::Reject, id, tx.clone())
-                                }
-                            }
-                        }
+                        effects.extend(app.handle_key(key));
                     }
                     _ => {} // resize is handled by the next draw
                 }
             }
+            for effect in effects {
+                    match effect {
+                        Effect::Quit => break 'ui,
+                        Effect::RefreshNow => {
+                            let _ = wake_tx.send(());
+                        }
+                        Effect::LoadConfig => {
+                            spawn_call(&client, Duration::from_secs(5), tx.clone(), |c| Loaded::Config(c.config()))
+                        }
+                        Effect::LoadVersion => {
+                            spawn_call(&client, Duration::from_secs(5), tx.clone(), |c| Loaded::Version(c.version()))
+                        }
+                        // the doctor reads real infrastructure: it can take a while
+                        Effect::RunDiagnostics => spawn_call(&client, DIAGNOSTICS_TIMEOUT, tx.clone(), |c| {
+                            Loaded::Diagnostics(c.diagnostics())
+                        }),
+                        // sent exactly once per confirmation; there is no retry anywhere
+                        Effect::StopControlPlane => {
+                            spawn_call(&client, Duration::from_secs(10), tx.clone(), |c| Loaded::Stop(c.stop_control_plane()))
+                        }
+                        // A REAL fault: sent once, after the operator confirmed the dialog.
+                        Effect::PauseWorkload { target, seconds } => {
+                            spawn_call(&client, Duration::from_secs(20), tx.clone(), move |c| {
+                                Loaded::FaultPaused(c.fault_pause(&target, seconds))
+                            })
+                        }
+                        Effect::ResumeWorkload => {
+                            spawn_call(&client, Duration::from_secs(20), tx.clone(), |c| {
+                                Loaded::FaultResumed(c.fault_resume())
+                            })
+                        }
+                        Effect::StartPractice => spawn_call(&client, Duration::from_secs(10), tx.clone(), |c| {
+                            Loaded::PracticeStarted(c.practice_start())
+                        }),
+                        Effect::InjectFault => spawn_call(&client, Duration::from_secs(10), tx.clone(), |c| {
+                            Loaded::PracticeFault(c.practice_fault())
+                        }),
+                        Effect::EndPractice => spawn_call(&client, Duration::from_secs(10), tx.clone(), |c| {
+                            Loaded::PracticeStopped(c.practice_stop())
+                        }),
+                        // a decision goes to the namespace the operator is looking at
+                        Effect::Approve(id) => {
+                            let c = if app.practice { client.practice() } else { client.clone() };
+                            spawn_action(&c, ActionKind::Approve, id, tx.clone())
+                        }
+                        Effect::Reject(id) => {
+                            let c = if app.practice { client.practice() } else { client.clone() };
+                            spawn_action(&c, ActionKind::Reject, id, tx.clone())
+                        }
+                    }
+                }
         }
         Ok(())
     })();

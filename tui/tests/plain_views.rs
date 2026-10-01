@@ -67,15 +67,21 @@ fn assert_no_jargon(s: &str) {
 // --- overview ----------------------------------------------------------------------------------
 
 #[test]
-fn a_healthy_overview_is_a_few_plain_facts() {
+fn a_healthy_home_answers_what_is_running_is_it_healthy_is_autopilot_watching_and_what_next() {
     let s = screen(&app(status(HEALTHY), vec![]));
-    for needle in ["Everything is working", "Your model", "facebook/opt-125m", "Answering · 18 ms", "GPU",
-                   "35% memory used · 59°C", "Needs attention", "Nothing right now", "P  Practice an incident",
-                   "D  Technical details"] {
+    for needle in [
+        // what is running, and is it healthy
+        "Inference", "vllm", "✓ HEALTHY", "facebook/opt-125m", "Probe 18 ms", "Memory 35% of 8.0 GiB", "Temp 59°C", "Busy 23%",
+        // is Autopilot watching
+        "Autopilot", "✓ WATCHING", "Last observation", "No active incidents.",
+        "✓ Observe › ○ Detect › ○ Diagnose › ○ Propose › ○ Approve › ○ Recover › ○ Verify",
+        // what can I do next
+        "Want to see the recovery loop?", "[R] Run a recovery test", "[I] View incidents", "[A] View activity",
+    ] {
         has(&s, needle);
     }
     assert_no_jargon(&s);
-    for gone in ["Metrics", "Queue", "Traffic", "Thermals", "VRAM", "AUDIT ✓ VERIFIED", "Identity"] {
+    for gone in ["Metrics", "Queue", "Thermals", "VRAM", "AUDIT ✓ VERIFIED", "Identity", "Everything is working"] {
         lacks(&s, gone);
     }
 }
@@ -83,15 +89,15 @@ fn a_healthy_overview_is_a_few_plain_facts() {
 #[test]
 fn d_swaps_between_the_plain_and_the_technical_view_and_back() {
     let mut a = app(status(HEALTHY), vec![]);
-    has(&screen(&a), "Everything is working");
+    has(&screen(&a), "✓ WATCHING");
     a.handle_key(key('d'));
     let tech = screen(&a);
-    for needle in ["Probe ✓", "Metrics ✓", "KV cache", "GPU 0 · GPU-1e5dd8d1", "AUDIT ✓ VERIFIED", "● HEALTHY"] {
+    for needle in ["Probe ✓", "Metrics ✓", "KV cache", "GPU 0 · GPU-1e5dd8d1", "AUDIT ✓ VERIFIED", "● HEALTHY", "docker-real-gpu"] {
         has(&tech, needle);
     }
-    lacks(&tech, "Everything is working");
+    lacks(&tech, "✓ WATCHING");
     a.handle_key(key('D'));
-    has(&screen(&a), "Everything is working");
+    has(&screen(&a), "✓ WATCHING");
     // and the footer says which way it goes
     has(ui::render_to_string(&a, 160, 40).lines().last().unwrap(), "D Details");
     a.handle_key(key('d'));
@@ -99,32 +105,36 @@ fn d_swaps_between_the_plain_and_the_technical_view_and_back() {
 }
 
 #[test]
-fn the_headline_is_one_honest_sentence_for_each_situation() {
-    let headline = |a: &App| -> String { screen(a) };
+fn each_situation_has_one_honest_state_word_and_a_glyph() {
     // a problem waiting for a decision
     let waiting = app(status(UNRESPONSIVE), vec![incident(PENDING, "inc_001")]);
-    let s = headline(&waiting);
-    has(&s, "A problem needs your OK");
+    let s = screen(&waiting);
+    has(&s, "! NEEDS YOUR OK");
     has(&s, "Your model stopped answering");
-    has(&s, "● Needs your OK");
+    has(&s, "→ Approve");
     // a problem being worked on
     let mut working = incident(PENDING, "inc_001");
     working.status = "VERIFYING".into();
-    has(&headline(&app(status(UNRESPONSIVE), vec![working])), "Working on a problem");
+    let s = screen(&app(status(UNRESPONSIVE), vec![working]));
+    has(&s, "→ VERIFYING");
+    has(&s, "✓ Recover › → Verify");
     // the model not answering but no incident yet (the detector needs two failures in a row)
     let mut st = status(UNRESPONSIVE);
     st.last_observation.as_mut().unwrap().insert("inference_probe_ok".into(), false.into());
-    let s = headline(&app(st, vec![]));
-    has(&s, "Your model is not answering");
-    has(&s, "Not answering");
+    let s = screen(&app(st, vec![]));
+    has(&s, "✗ NOT ANSWERING");
+    has(&s, "✓ WATCHING");
+    lacks(&s, "Probe 3004 ms");                              // a failed probe's timeout is not a measurement
     // no first reading
     let mut st = status(HEALTHY);
     st.last_observation = None;
-    has(&headline(&app(st, vec![])), "Waiting for the first reading");
+    let s = screen(&app(st, vec![]));
+    has(&s, "○ NO READING YET");
+    has(&s, "N/A");
 }
 
 #[test]
-fn the_headline_colours_follow_the_situation_and_never_rely_on_colour_alone() {
+fn the_state_colours_follow_the_situation_and_never_rely_on_colour_alone() {
     let colour_of = |a: &App, needle: &str| {
         let buf = ui::render_to_buffer(a, 120, 56);
         let w = buf.area.width as usize;
@@ -136,18 +146,18 @@ fn the_headline_colours_follow_the_situation_and_never_rely_on_colour_alone() {
         }
         panic!("{needle} not on screen")
     };
-    assert_eq!(colour_of(&app(status(HEALTHY), vec![]), "Everything is working"), theme::HEALTHY);
-    assert_eq!(colour_of(&app(status(UNRESPONSIVE), vec![incident(PENDING, "inc_001")]), "A problem needs your OK"), theme::WARNING);
+    assert_eq!(colour_of(&app(status(HEALTHY), vec![]), "✓ HEALTHY"), theme::HEALTHY);
+    assert_eq!(colour_of(&app(status(UNRESPONSIVE), vec![incident(PENDING, "inc_001")]), "! NEEDS YOUR OK"), theme::WARNING);
     let mut st = status(UNRESPONSIVE);
     st.last_observation.as_mut().unwrap().insert("inference_probe_ok".into(), false.into());
-    assert_eq!(colour_of(&app(st, vec![]), "Your model is not answering"), theme::CRITICAL);
+    assert_eq!(colour_of(&app(st, vec![]), "✗ NOT ANSWERING"), theme::CRITICAL);
 }
 
 #[test]
-fn no_workload_is_a_valid_calm_state_with_an_explanation() {
+fn no_workload_is_a_valid_calm_state_with_a_truthful_explanation() {
     for (state, headline, text) in [
-        ("absent", "No workload connected", "waiting for an operator-managed inference workload"),
-        ("stopped", "The workload is stopped", "picked up automatically"),
+        ("absent", "NO WORKLOAD CONNECTED", "no managed inference"),
+        ("stopped", "WORKLOAD STOPPED", "Autopilot will not start it"),
     ] {
         let mut st = status(HEALTHY);
         st.workload = Some(serde_json::from_value(serde_json::json!({"name": "vllm", "state": state})).unwrap());
@@ -156,16 +166,22 @@ fn no_workload_is_a_valid_calm_state_with_an_explanation() {
         let s = screen(&app(st, vec![]));
         has(&s, headline);
         has(&s, text);
-        has(&s, "Nothing right now");
-        lacks(&s, "Everything is working");
-        lacks(&s, "Not answering");
+        has(&s, "✓ WATCHING");
+        lacks(&s, "NOT ANSWERING");
+        lacks(&s, "✗");
         assert_no_jargon(&s);
     }
     let mut st = status(HEALTHY);
+    st.workload = Some(serde_json::from_value(serde_json::json!({"name": "vllm", "state": "absent"})).unwrap());
+    st.last_observation = None;
+    let s = screen(&app(st, vec![]));
+    has(&s, "workload is currently available.");
+    has(&s, "Autopilot will not create or start one automatically.");
+    has(&s, "Go to System (5) for diagnostics.");
+    let mut st = status(HEALTHY);
     st.workload = Some(serde_json::from_value(serde_json::json!({"name": "vllm", "state": "starting"})).unwrap());
     let s = screen(&app(st, vec![]));
-    has(&s, "Your model is starting");
-    has(&s, "Starting up");
+    has(&s, "→ STARTING");
 }
 
 #[test]
@@ -176,9 +192,12 @@ fn unavailable_values_are_na_never_invented() {
         o.remove(k);
     }
     let s = screen(&app(st, vec![]));
-    has(&s, "N/A");                                         // the GPU line
-    has(&s, "Answering · N/A");                              // latency unknown: not "0 ms"
-    lacks(&s, "0% memory");
+    has(&s, "Memory N/A");
+    has(&s, "Temp N/A");
+    has(&s, "Probe N/A");                                    // latency unknown: not "0 ms"
+    lacks(&s, "0%");
+    // there is no p95 anywhere: only what the server reports
+    lacks(&s, "p95");
 }
 
 #[test]
@@ -186,19 +205,23 @@ fn an_unreachable_control_plane_is_said_plainly() {
     let mut a = app(status(HEALTHY), vec![]);
     a.apply(Msg::Poll(Err(ApiError::Timeout)));
     let s = screen(&a);
-    has(&s, "Cannot reach the control plane");
-    lacks(&s, "Everything is working");
+    has(&s, "CONTROL PLANE OFFLINE");
+    has(&s, "✗ NOT WATCHING");
+    lacks(&s, "✓ WATCHING");
+    has(&s, "Stale · last values observed");
 }
 
 #[test]
-fn recent_incidents_and_the_selection_are_in_plain_words() {
+fn incidents_on_home_are_one_line_each_with_state_word_glyph_and_age() {
     let a = app(status(HEALTHY), vec![incident(RESOLVED, "inc_001")]);
     let s = screen(&a);
-    has(&s, "Recent");
-    has(&s, "inc_001  Your model stopped answering → Resolved");
-    has(&s, "Nothing right now");                            // the closed one is not "needs attention"
+    has(&s, "✓ RESOLVED");
+    has(&s, "Your model stopped answering");
+    has(&s, "inc_001 · Recovered");
+    has(&s, "✓ WATCHING");                                    // a closed incident does not stop it watching
     let mut b = app(status(UNRESPONSIVE), vec![incident(PENDING, "inc_001")]);
-    has(&screen(&b), "› Your model stopped answering");
+    has(&screen(&b), "› ! NEEDS YOUR OK");
+    has(&screen(&b), "Enter  Review the selected incident");
     b.handle_key(code(KeyCode::Enter));
     has(&screen(&b), "What happened");                       // Enter opens the incident
 }
@@ -206,30 +229,43 @@ fn recent_incidents_and_the_selection_are_in_plain_words() {
 // --- incidents list -----------------------------------------------------------------------------
 
 #[test]
-fn the_incident_list_is_problem_status_and_time() {
+fn the_incident_list_reads_as_operations_what_why_what_action_and_whether_it_needs_you() {
     let mut a = app(status(UNRESPONSIVE), vec![incident(PENDING, "inc_001"), incident(RESOLVED, "inc_000")]);
     a.handle_key(key('2'));
     let s = screen(&a);
-    for needle in ["ID", "PROBLEM", "STATUS", "STARTED", "inc_001", "Your model stopped answering",
-                   "● Needs your OK", "● Resolved", "15:02:11"] {
+    for needle in ["› ! NEEDS YOUR OK", "Your model stopped answering", "inc_001 · Detected",
+                   "Diagnosis: Inference requests are failing or timing out",
+                   "Action: Restart the model server · Approval: REQUIRED",
+                   "✓ RESOLVED", "inc_000 · Recovered", "Enter  Review the selected incident"] {
         has(&s, needle);
     }
     assert_no_jargon(&s);
+    for old in ["ID  ", "PROBLEM", "STATUS", "STARTED"] {
+        lacks(&s, old);                                       // not a database table any more
+    }
     let narrow = ui::render_to_string(&a, 72, 30);
-    has(&narrow, "PROBLEM");
-    has(&narrow, "● Needs your OK");
-    lacks(&narrow, "STARTED");                               // the narrow table keeps what matters
+    has(&narrow, "! NEEDS YOUR OK");
+    has(&narrow, "Your model stopped answering");
 }
 
 #[test]
-fn an_empty_incident_list_says_everything_is_healthy_and_offers_practice() {
+fn an_empty_incident_list_is_useful_not_a_dead_end() {
     let mut a = app(status(HEALTHY), vec![]);
     a.handle_key(key('2'));
     let s = screen(&a);
-    for needle in ["No incidents", "Everything is healthy right now.", "P  Practice an incident"] {
+    for needle in ["NO ACTIVE INCIDENTS", "Autopilot is watching the inference workload.",
+                   "Want to see the recovery loop?", "[R] Run a recovery test"] {
         has(&s, needle);
     }
-    lacks(&s, "ID  ");
+    // with nothing to watch it does not claim to be watching
+    let mut st = status(HEALTHY);
+    st.workload = Some(serde_json::from_value(serde_json::json!({"name": "vllm", "state": "absent"})).unwrap());
+    st.last_observation = None;
+    let mut b = app(st, vec![]);
+    b.handle_key(key('2'));
+    let s = screen(&b);
+    has(&s, "There is no managed workload to watch right now.");
+    lacks(&s, "Autopilot is watching the inference workload.");
 }
 
 // --- the incident page ----------------------------------------------------------------------------
@@ -290,11 +326,16 @@ fn the_recovery_check_names_a_count_only_when_the_server_gave_one() {
 }
 
 #[test]
-fn the_plain_pipeline_merges_policy_and_approval_into_your_ok() {
-    let s = screen(&detail_app(PENDING));
-    has(&s, "Detected › Diagnosed › Proposed › Your OK › Fixing › Checking › Result");
-    lacks(&s, "Policy");
-    lacks(&s, "Approval ›");
+fn the_pipeline_is_the_same_seven_stages_on_every_screen() {
+    let waiting = "✓ Observe › ✓ Detect › ✓ Diagnose › ✓ Propose › → Approve › ○ Recover › ○ Verify";
+    has(&screen(&detail_app(PENDING)), waiting);                       // the incident page
+    has(&screen(&app(status(UNRESPONSIVE), vec![incident(PENDING, "inc_001")])), waiting);   // Home
+    let mut lab = app(status(UNRESPONSIVE), vec![incident(PENDING, "inc_001")]);
+    lab.handle_key(key('3'));
+    has(&screen(&lab), "✓ Observe › ○ Detect");                       // the idle Lab: nothing to detect yet
+    has(&screen(&detail_app(RESOLVED)), "✓ Observe › ✓ Detect › ✓ Diagnose › ✓ Propose › ✓ Approve › ✓ Recover › ✓ Verify");
+    has(&screen(&detail_app(UNRESOLVED)), "✓ Recover › ✗ Verify");
+    lacks(&screen(&detail_app(PENDING)), "Policy");
 }
 
 #[test]
@@ -396,7 +437,7 @@ fn with_audit(events: Vec<serde_json::Value>, valid: bool) -> App {
     let evs: Vec<AuditEvent> = events.into_iter().map(|e| serde_json::from_value(e).unwrap()).collect();
     snap.audit = Some(serde_json::from_value(serde_json::json!({"valid": valid, "total": evs.len(), "events": evs.iter().map(|e| serde_json::json!({"seq": e.seq, "event": e.event, "data": e.data, "hash": e.hash})).collect::<Vec<_>>()})).unwrap());
     a.apply(Msg::Poll(Ok(snap)));
-    a.handle_key(key('3'));
+    a.handle_key(key('4'));
     a
 }
 
@@ -423,8 +464,9 @@ fn activity_reads_as_what_happened() {
 #[test]
 fn activity_with_nothing_yet_and_with_a_broken_chain() {
     let empty = screen(&with_audit(vec![], true));
-    has(&empty, "No activity yet");
-    has(&empty, "Actions and decisions will appear here.");
+    has(&empty, "NO RECENT ACTIVITY");
+    has(&empty, "Autopilot has not recorded any events yet.");
+    has(&empty, "[R] Run a recovery test");
     let broken = screen(&with_audit(vec![serde_json::json!({"seq": 0, "event": "incident_created", "data": {}, "hash": "h"})], false));
     has(&broken, "ACTIVITY LOG INTEGRITY FAILURE");
     lacks(&broken, "Activity log intact");
@@ -465,14 +507,14 @@ fn every_plain_screen_renders_at_common_sizes_without_panicking() {
 // --- the mode badge ---------------------------------------------------------------------------------
 
 fn header_row(a: &App) -> String {
-    ui::render_to_string(a, 120, 30).lines().nth(1).unwrap().to_string()
+    ui::render_to_string(a, 120, 30).lines().next().unwrap().to_string()
 }
 fn badge_cell(a: &App, text: &str) -> ratatui::style::Modifier {
     let buf = ui::render_to_buffer(a, 120, 30);
     let w = buf.area.width as usize;
-    let line: String = (0..w).map(|x| buf.content()[w + x].symbol().to_string()).collect();
+    let line: String = (0..w).map(|x| buf.content()[x].symbol().to_string()).collect();
     let at = line.chars().position(|_| true).map(|_| line.find(text).unwrap()).unwrap();
-    buf.content()[w + line[..at].chars().count()].modifier
+    buf.content()[line[..at].chars().count()].modifier
 }
 
 #[test]

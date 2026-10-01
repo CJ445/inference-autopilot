@@ -12,6 +12,10 @@ use crate::timeparse::parse_rfc3339;
 pub const STALE_AFTER: Duration = Duration::from_secs(3);
 /// The control plane's own last observation older than this is flagged as stale telemetry.
 pub const TELEMETRY_STALE_SECS: f64 = 10.0;
+/// The words the server uses when it refuses an approval because the problem is gone (D-14). The
+/// TUI recognises the refusal by this text; `tests/test_stale_approval.py` pins the server's message.
+pub const REFUSED_STALE: &str = "no longer present";
+
 /// A success notice fades after this long. An error stays until the operator presses a key.
 pub const NOTICE_TTL: Duration = Duration::from_secs(10);
 
@@ -53,6 +57,8 @@ pub enum Conn {
 pub enum Screen {
     Dashboard,
     Incidents,
+    /// The Lab: run a recovery test, or (when offered) inject a real fault.
+    Lab,
     Detail(String),
     /// Activity: what the system did and decided.
     Audit,
@@ -61,9 +67,10 @@ pub enum Screen {
     Help,
 }
 
-/// The four areas: the order `Tab` walks and the sidebar lists; `1`..`4` jump to them.
+/// The five areas: the order `Tab` walks and the navigation strip lists; `1`..`5` jump to them.
 /// Help is not an area: it is on `?`.
-pub const SCREEN_ORDER: [Screen; 4] = [Screen::Dashboard, Screen::Incidents, Screen::Audit, Screen::System];
+pub const SCREEN_ORDER: [Screen; 5] =
+    [Screen::Dashboard, Screen::Incidents, Screen::Lab, Screen::Audit, Screen::System];
 
 /// Something the server was asked for and has (or has not yet) answered. Never a default.
 #[derive(Debug, Clone)]
@@ -85,6 +92,7 @@ impl<T> Remote<T> {
 pub enum Command {
     Overview,
     Incidents,
+    Lab,
     Audit,
     System,
     Help,
@@ -112,36 +120,38 @@ pub struct Offer {
 pub const FAULT_SECONDS: u32 = 120;
 
 impl Command {
-    pub const ALL: [Command; 13] = [
-        Command::Overview,
+    pub const ALL: [Command; 14] = [
+        Command::Practice,
+        Command::BreakWorkload,
         Command::Incidents,
         Command::Audit,
+        Command::Lab,
+        Command::Overview,
         Command::System,
+        Command::ToggleDetails,
+        Command::StopControlPlane,
+        Command::ExitPractice,
+        Command::ResumeWorkload,
         Command::Help,
         Command::Refresh,
-        Command::StopControlPlane,
-        Command::Practice,
-        Command::ExitPractice,
-        Command::BreakWorkload,
-        Command::ResumeWorkload,
-        Command::ToggleDetails,
         Command::Quit,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
-            Command::Overview => "Go to Overview",
-            Command::Incidents => "Go to Incidents",
-            Command::Audit => "Go to Activity",
-            Command::System => "Go to System",
-            Command::Help => "Open Help",
+            Command::Overview => "Go to Home",
+            Command::Incidents => "View incidents",
+            Command::Lab => "Open the Lab",
+            Command::Audit => "View activity",
+            Command::System => "Show system status",
+            Command::Help => "Help",
             Command::Refresh => "Refresh",
             Command::StopControlPlane => "Stop control plane…",
-            Command::Practice => "Practice an incident",
-            Command::ExitPractice => "Exit practice",
-            Command::BreakWorkload => "Break the real workload (pause)…",
+            Command::Practice => "Run a recovery test",
+            Command::ExitPractice => "Leave the recovery test",
+            Command::BreakWorkload => "Inject a real fault (pause the workload)…",
             Command::ResumeWorkload => "Resume the workload now",
-            Command::ToggleDetails => "Show or hide technical details",
+            Command::ToggleDetails => "Show technical details",
             Command::Quit => "Quit",
         }
     }
@@ -184,19 +194,19 @@ pub struct ClientInfo {
 /// The keys that do something, in the order Help lists them. `tests/help.rs` drives every row.
 pub const KEYMAP: [(&str, &str); 17] = [
     ("↑ ↓", "Navigate / scroll"),
-    ("Enter", "Inspect the selected incident"),
-    ("Esc", "Back / cancel / close (on the Overview while practicing: leave practice)"),
-    ("Tab →", "Next screen"),
-    ("←", "Previous screen"),
-    ("1-4", "Jump to Overview, Incidents, Activity or System"),
+    ("Enter", "Review the selected incident"),
+    ("Esc", "Back / cancel / close (while testing, on Home or the Lab: leave the test)"),
+    ("Tab →", "Next area"),
+    ("←", "Previous area"),
+    ("1-5", "Jump to Home, Incidents, Lab, Activity or System"),
     ("?", "Help"),
     ("Ctrl+P", "Command palette"),
-    ("P", "Practice an incident (simulated; nothing real is touched)"),
-    ("F", "Break the model while practicing (simulated)"),
+    ("R", "Run a recovery test (simulated; nothing real is touched). On an incident: reject"),
+    ("F", "Inject a real fault (asks first). While testing: break the simulated model"),
+    ("I", "Go to Incidents"),
     ("D", "Technical details on or off (System: run the checks again)"),
     ("S", "Refresh now"),
-    ("A", "Approve (on an incident's page, once it awaits a decision)"),
-    ("R", "Reject (on an incident's page, once it awaits a decision)"),
+    ("A", "Go to Activity. On an incident's page, once it awaits a decision: approve"),
     ("X", "Stop the control plane (System)"),
     ("Q", "Quit (the control plane keeps running)"),
     ("Ctrl+C", "Quit"),
@@ -326,6 +336,10 @@ pub struct App {
     pub practice: bool,
     /// Show the technical views (exact names, raw states, metrics) instead of the plain ones.
     pub details: bool,
+    /// Effects the app itself asks for (not a key press): drained by the event loop.
+    pub pending: Vec<Effect>,
+    /// A recovery test was just started: inject its simulated fault once the server says healthy.
+    auto_fault: bool,
     /// How colours are shown. `App::new` is the semantic (Dark) palette the tests inspect; the
     /// binary chooses the real one from `--theme` / `NO_COLOR`.
     pub theme: crate::theme::Theme,
@@ -333,6 +347,12 @@ pub struct App {
     pub stop_opened: Instant,
     /// The dialog that asks before a REAL workload is paused.
     pub fault_confirm: bool,
+    /// The server refused an approval because the problem was gone (D-14): said in a dialog, not
+    /// in a line that fades, so that "nothing was restarted" is read.
+    pub refusal: Option<String>,
+    /// The action the server proposed for each incident, remembered from earlier polls: once an
+    /// incident is approved the server no longer lists its proposal, but the story still names it.
+    actions: std::collections::HashMap<String, String>,
     pub fault_opened: Instant,
     pub stop_sent: Option<Instant>,
     pub now: Instant,
@@ -368,10 +388,14 @@ impl App {
             palette: None,
             practice: false,
             details: false,
+            pending: Vec::new(),
+            auto_fault: false,
             theme: crate::theme::Theme::Dark,
             stop_confirm: false,
             stop_opened: Instant::now(),
             fault_confirm: false,
+            refusal: None,
+            actions: std::collections::HashMap::new(),
             fault_opened: Instant::now(),
             stop_sent: None,
             now: Instant::now(),
@@ -432,6 +456,8 @@ impl App {
         Interest {
             detail_id: match &self.screen {
                 Screen::Detail(id) => Some(id.clone()),
+                // the recovery test's story needs the recorded checks of its incident
+                Screen::Lab if self.practice => self.rows().first().map(|i| i.incident_id.clone()),
                 _ => None,
             },
             want_audit: self.screen == Screen::Audit,
@@ -456,6 +482,9 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && key.code == KeyCode::Char('c') {
             return vec![Effect::Quit];
+        }
+        if self.refusal.take().is_some() {
+            return Vec::new();                  // any key reads the refusal away
         }
         if let Some(c) = self.confirm.clone() {
             // While a confirmation is open ONLY Enter (do it) or Esc (don't) mean anything.
@@ -518,7 +547,7 @@ impl App {
             KeyCode::Char('s') | KeyCode::Char('S') => return vec![Effect::RefreshNow],
             KeyCode::Tab | KeyCode::Right => fx = self.cycle(1),
             KeyCode::Left => fx = self.cycle(-1),
-            KeyCode::Char(c @ '1'..='4') => {
+            KeyCode::Char(c @ '1'..='5') => {
                 fx = self.go(SCREEN_ORDER[c as usize - '1' as usize].clone());
             }
             KeyCode::Char('?') => fx = self.go(Screen::Help),
@@ -527,7 +556,7 @@ impl App {
             KeyCode::PageUp => self.step(-8),
             KeyCode::PageDown => self.step(8),
             KeyCode::Enter => {
-                if matches!(self.screen, Screen::Dashboard | Screen::Incidents) {
+                if matches!(self.screen, Screen::Dashboard | Screen::Incidents | Screen::Lab) {
                     if let Some(id) = self.selected_incident().map(|i| i.incident_id.clone()) {
                         self.back = self.screen.clone();
                         self.screen = Screen::Detail(id);
@@ -540,14 +569,27 @@ impl App {
                     self.screen = self.back.clone();
                     self.scroll = 0;
                 }
-                Screen::Dashboard if self.practice => fx = vec![Effect::EndPractice],
+                Screen::Dashboard | Screen::Lab if self.practice => fx = vec![Effect::EndPractice],
                 Screen::Dashboard => {}
                 _ => fx = self.go(Screen::Dashboard),
             },
-            KeyCode::Char('p') | KeyCode::Char('P') => fx = self.begin_practice(),
+            KeyCode::Char('i') | KeyCode::Char('I') => fx = self.go(Screen::Incidents),
             KeyCode::Char('f') | KeyCode::Char('F') if self.practice => fx = self.inject_fault(),
-            KeyCode::Char('a') | KeyCode::Char('A') => self.begin(ActionKind::Approve),
-            KeyCode::Char('r') | KeyCode::Char('R') => self.begin(ActionKind::Reject),
+            // F opens the real-fault DIALOG (nothing is sent until Enter after the guard), and only
+            // on the screens that show the action, so a stray F elsewhere does nothing.
+            KeyCode::Char('f') | KeyCode::Char('F') if matches!(self.screen, Screen::Dashboard | Screen::Lab) => {
+                self.begin_fault()
+            }
+            // A and R decide an incident only on its page (the Incidents list explains); on the
+            // other screens they are the quick actions: Activity, and run a recovery test.
+            KeyCode::Char('a') | KeyCode::Char('A') if matches!(self.screen, Screen::Detail(_) | Screen::Incidents) => {
+                self.begin(ActionKind::Approve)
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') if matches!(self.screen, Screen::Detail(_) | Screen::Incidents) => {
+                self.begin(ActionKind::Reject)
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') => fx = self.go(Screen::Audit),
+            KeyCode::Char('r') | KeyCode::Char('R') => fx = self.begin_practice(),
             KeyCode::Char('d') | KeyCode::Char('D') if self.screen == Screen::System => {
                 fx = self.load_diagnostics(true)
             }
@@ -605,6 +647,7 @@ impl App {
     pub fn run(&mut self, cmd: Command) -> Vec<Effect> {
         match cmd {
             Command::Overview => self.go(Screen::Dashboard),
+            Command::Lab => self.go(Screen::Lab),
             Command::Incidents => self.go(Screen::Incidents),
             Command::Audit => self.go(Screen::Audit),
             Command::System => self.go(Screen::System),
@@ -703,11 +746,13 @@ impl App {
 
     fn leave_practice(&mut self) {
         self.practice = false;
+        self.auto_fault = false;
         self.reset_view();
     }
 
     /// A different namespace is a different world: nothing from the old one may stay on screen.
     fn reset_view(&mut self) {
+        self.actions.clear();               // a different namespace: nothing remembered carries over
         self.snapshot = None;
         self.screen = Screen::Dashboard;
         self.selected = 0;
@@ -832,6 +877,33 @@ impl App {
 
     // ---- messages from the poller and from actions -------------------------------------------
 
+    /// The action the server proposed for this incident (now, or when it last listed it).
+    pub fn proposed_action(&self, id: &str) -> Option<&str> {
+        self.actions.get(id).map(String::as_str)
+    }
+
+    /// The effects the app asked for on its own (see `pending`).
+    pub fn take_effects(&mut self) -> Vec<Effect> {
+        std::mem::take(&mut self.pending)
+    }
+
+    /// A recovery test is one key: once the server reports the simulated model healthy, ask it to
+    /// break it. Two existing calls in sequence; the server still enforces "only into a healthy
+    /// model", and nothing is shown that the server did not report.
+    fn maybe_inject_test_fault(&mut self) {
+        if !self.auto_fault || !self.practice {
+            return;
+        }
+        match self.snapshot.as_ref().and_then(|s| s.status.practice.as_ref()).map(|p| p.stage.as_str()) {
+            Some("healthy") => {
+                self.auto_fault = false;
+                self.pending.push(Effect::InjectFault);
+            }
+            Some(_) => self.auto_fault = false,     // already past healthy: nothing to inject
+            None => {}
+        }
+    }
+
     pub fn apply(&mut self, msg: Msg) {
         match msg {
             Msg::Poll(Ok(snapshot)) if snapshot.practice != self.practice => {} // other namespace
@@ -841,10 +913,16 @@ impl App {
             }
             Msg::Poll(Ok(mut snapshot)) => {
                 snapshot.fetched_at = Some(self.now);
+                for i in &snapshot.incidents {
+                    if let Some(p) = &i.proposal {
+                        self.actions.insert(i.incident_id.clone(), p.action.clone());
+                    }
+                }
                 self.update_rates(&snapshot.status);
                 self.conn = Conn::Online;
                 self.snapshot = Some(snapshot);
                 self.selected = self.selected.min(self.rows().len().saturating_sub(1));
+                self.maybe_inject_test_fault();
             }
             Msg::Poll(Err(e)) => {
                 self.conn = match &self.conn {
@@ -862,6 +940,9 @@ impl App {
                         &format!("{} sent for {id}: the server reports {}", kind.verb(), incident.status),
                         false,
                     ),
+                    Err(ApiError::Server { ref message, .. }) if message.contains(REFUSED_STALE) => {
+                        self.refusal = Some(id);
+                    }
                     Err(ApiError::Timeout) => self.say(
                         &format!("no answer for {id} yet; the server may still be working: check its state"),
                         true,
@@ -895,9 +976,11 @@ impl App {
             }
             Loaded::PracticeStarted(Ok(())) => {
                 self.enter_practice();
-                self.say("practice started: everything here is simulated", false);
+                self.screen = Screen::Lab;
+                self.auto_fault = true;      // the fault follows as soon as the server says healthy
+                self.say("recovery test started: everything here is simulated", false);
             }
-            Loaded::PracticeStarted(Err(e)) => self.say(&format!("could not start practice: {e}"), true),
+            Loaded::PracticeStarted(Err(e)) => self.say(&format!("could not start the recovery test: {e}"), true),
             Loaded::PracticeFault(Ok(())) => self.say("simulated fault injected: watch the detector", false),
             Loaded::PracticeFault(Err(e)) => self.say(&format!("could not inject the fault: {e}"), true),
             Loaded::PracticeStopped(result) => {

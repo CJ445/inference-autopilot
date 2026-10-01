@@ -74,7 +74,7 @@ fn the_palette_offers_the_fault_only_when_the_server_offers_it_and_none_is_activ
     assert!(!busy.can_break && busy.can_resume, "one fault at a time; resume is offered instead");
     let mut a = offered();
     a.handle_key(ctrl('p'));
-    has(&screen(&a), "Break the real workload (pause)…");
+    has(&screen(&a), "Inject a real fault (pause the workload)…");
     lacks(&screen(&a), "Resume the workload now");
 }
 
@@ -87,34 +87,50 @@ fn it_is_hidden_while_practicing_and_while_the_control_plane_is_unreachable() {
     off.apply(Msg::Poll(Err(ApiError::Offline("refused".into()))));
     assert!(!off.offer().can_break);
     off.handle_key(ctrl('p'));
-    lacks(&screen(&off), "Break the real workload");
+    lacks(&screen(&off), "Inject a real fault");
 }
 
 // --- never a plain key; always an explicit confirmation ----------------------------------------------
 
 #[test]
-fn no_plain_key_and_no_palette_typing_ever_opens_the_fault_dialog_or_sends_it() {
+fn only_f_on_home_or_the_lab_opens_the_fault_dialog_and_no_key_ever_sends_it() {
+    // on Home: F opens the DIALOG and nothing else does; no key sends the fault
     let mut a = offered();
-    for c in "abcdefghijklmnopqrstuvwxyz0123456789?".chars() {
+    for c in "abcdeghijklmnopqrstuvwxyz0123456789?".chars() {      // every plain key but F
         let fx = a.handle_key(key(c));
         assert!(!fx.iter().any(|e| matches!(e, Effect::PauseWorkload { .. })), "{c}");
         assert!(!a.fault_confirm, "{c} opened the dialog");
         a.handle_key(code(KeyCode::Esc));
+        a.handle_key(key('1'));
     }
-    palette_to(&mut a, "break");                        // only filters; nothing happens until Enter
+    let fx = a.handle_key(key('f'));
+    assert!(fx.is_empty() && a.fault_confirm, "F opens the dialog and sends nothing");
+    a.handle_key(code(KeyCode::Esc));
+    // everywhere else F does nothing at all: a stray F in another area cannot open it
+    for screen_key in ['2', '4', '5', '?'] {
+        a.handle_key(key(screen_key));
+        assert!(a.handle_key(key('f')).is_empty() && !a.fault_confirm, "F opened it on screen {screen_key}");
+    }
+    // the Lab shows the action, so F works there too
+    a.handle_key(key('3'));
+    assert!(a.handle_key(key('f')).is_empty() && a.fault_confirm);
+    a.handle_key(code(KeyCode::Esc));
+    palette_to(&mut a, "inject");                       // only filters; nothing happens until Enter
     assert!(!a.fault_confirm);
 }
 
 #[test]
 fn choosing_the_command_opens_a_dialog_that_says_what_will_happen_and_sends_nothing() {
     let mut a = offered();
-    palette_to(&mut a, "break");
+    palette_to(&mut a, "inject");
     assert!(a.handle_key(code(KeyCode::Enter)).is_empty(), "choosing it only opens the dialog");
     assert!(a.fault_confirm);
     let s = screen(&a);
-    for needle in ["Pause the real workload?", "LIVE · GPU-REAL", "This will pause the real inference workload.",
-                   "stop answering until it is automatically resumed",
-                   "(in 2 minutes) or the recovery flow restarts it.", "Nothing else is touched.", "vllm", "[Enter] Confirm", "[Esc] Cancel"] {
+    for needle in ["REAL INFRASTRUCTURE FAULT", "LIVE · GPU-REAL", "This will pause the managed workload vllm.",
+                   "for up to 2 minutes, then resumes by itself", "Healthy › Paused › Detected › Your approval › Restart › Verified recovery",
+                   "only the managed workload, by its checked identity", "a recovery lease is saved before anything is paused",
+                   "resumed automatically after 2 minutes", "a separate process resumes it even if this one dies",
+                   "[Enter] Inject fault", "[Esc] Cancel"] {
         has(&s, needle);
     }
     assert_eq!(FAULT_SECONDS, 120);
@@ -123,7 +139,7 @@ fn choosing_the_command_opens_a_dialog_that_says_what_will_happen_and_sends_noth
 #[test]
 fn only_enter_after_the_guard_sends_it_exactly_once_and_names_only_the_servers_workload() {
     let mut a = offered();
-    palette_to(&mut a, "break");
+    palette_to(&mut a, "inject");
     a.handle_key(code(KeyCode::Enter));
     assert!(a.handle_key(code(KeyCode::Enter)).is_empty(), "inside the guard Enter is ignored");
     for k in [key('y'), key('a'), key('q'), key('p'), code(KeyCode::Tab), ctrl('p')] {
@@ -142,7 +158,7 @@ fn only_enter_after_the_guard_sends_it_exactly_once_and_names_only_the_servers_w
 #[test]
 fn esc_cancels_the_dialog_immediately_and_sends_nothing() {
     let mut a = offered();
-    palette_to(&mut a, "break");
+    palette_to(&mut a, "inject");
     a.handle_key(code(KeyCode::Enter));
     assert!(a.handle_key(code(KeyCode::Esc)).is_empty() && !a.fault_confirm);
     a.now += Duration::from_secs(2);
@@ -152,14 +168,14 @@ fn esc_cancels_the_dialog_immediately_and_sends_nothing() {
 #[test]
 fn the_confirm_key_looks_inactive_until_the_guard_has_elapsed() {
     let mut a = offered();
-    palette_to(&mut a, "break");
+    palette_to(&mut a, "inject");
     a.handle_key(code(KeyCode::Enter));
     let colour = |a: &App| {
         let buf = ui::render_to_buffer(a, 130, 40);
         let w = buf.area.width as usize;
         for row in 0..buf.area.height as usize {
             let line: String = (0..w).map(|x| buf.content()[row * w + x].symbol().to_string()).collect();
-            if let Some(b) = line.find("[Enter] Confirm") {
+            if let Some(b) = line.find("[Enter] Inject fault") {
                 return buf.content()[row * w + line[..b].chars().count()].fg;
             }
         }
@@ -217,7 +233,7 @@ fn no_banner_without_a_fault_and_none_in_practice() {
     })));
     let s = screen(&a);
     lacks(&s, "FAULT ACTIVE");
-    has(&s, "PRACTICE · SIMULATION");
+    has(&s, "RECOVERY TEST · SIMULATION");
 }
 
 #[test]
@@ -259,13 +275,13 @@ fn the_results_are_reported_without_overstating() {
 fn a_dialog_in_progress_blocks_the_palette_and_every_screen_renders_with_banner_and_dialog() {
     let mut a = active(60.0);
     for (w, h) in [(72, 18), (80, 24), (130, 40), (200, 60)] {
-        for n in "1234567?".chars() {
+        for n in "12345?".chars() {
             a.handle_key(key(n));
             ui::render_to_string(&a, w, h);
         }
     }
     let mut b = offered();
-    palette_to(&mut b, "break");
+    palette_to(&mut b, "inject");
     b.handle_key(code(KeyCode::Enter));
     for (w, h) in [(72, 18), (80, 24), (130, 40)] {
         ui::render_to_string(&b, w, h);

@@ -151,14 +151,18 @@ fn tab_and_number_keys_switch_screens_and_audit_is_only_polled_on_its_screen() {
     app.handle_key(code(KeyCode::Tab));
     assert!(matches!(app.screen, Screen::Incidents));
     app.handle_key(code(KeyCode::Tab));
+    assert!(matches!(app.screen, Screen::Lab));
+    app.handle_key(code(KeyCode::Tab));
     assert!(matches!(app.screen, Screen::Audit) && app.interest().want_audit);
-    for _ in 0..6 {                       // Control Plane, Settings, Diagnostics, About, Help, Overview
+    for _ in 0..2 {                       // System, then round to Home
         app.handle_key(code(KeyCode::Tab));
     }
     assert!(matches!(app.screen, Screen::Dashboard) && !app.interest().want_audit);
     app.handle_key(key('2'));
     assert!(matches!(app.screen, Screen::Incidents));
     app.handle_key(key('3'));
+    assert!(matches!(app.screen, Screen::Lab));
+    app.handle_key(key('4'));
     assert!(matches!(app.screen, Screen::Audit));
     app.handle_key(key('1'));
     assert!(matches!(app.screen, Screen::Dashboard));
@@ -231,12 +235,15 @@ fn a_second_action_cannot_start_while_one_is_in_flight() {
 fn approval_is_not_offered_without_a_pending_proposal() {
     // resolved, no proposal
     let mut app = online(HEALTHY, vec![incident(RESOLVED, "inc_001")]);
+    app.handle_key(key('2'));                         // the Incidents list: A and R only explain
     assert!(app.handle_key(key('a')).is_empty() && app.confirm.is_none() && app.notice.is_some());
     // insufficient evidence: the server proposed nothing
     let mut app = online(HEALTHY, vec![incident(INSUFFICIENT, "inc_001")]);
+    app.handle_key(key('2'));
     assert!(app.handle_key(key('r')).is_empty() && app.confirm.is_none());
     // nothing selected
     let mut app = online(HEALTHY, vec![]);
+    app.handle_key(key('2'));
     assert!(app.handle_key(key('a')).is_empty() && app.confirm.is_none());
 }
 
@@ -260,6 +267,7 @@ fn approval_is_decided_from_the_incident_page() {
 fn nothing_can_be_confirmed_while_the_control_plane_is_offline() {
     let mut app = with_pending();
     app.apply(Msg::Poll(Err(ApiError::Offline("down".into()))));
+    app.handle_key(key('2'));
     assert!(app.handle_key(key('a')).is_empty() && app.confirm.is_none());
     assert!(app.notice.is_some());
 }
@@ -428,16 +436,21 @@ fn a_client_timeout_on_approve_is_not_reported_as_a_failure_and_is_never_retried
 // --- review before deciding; the confirmation cannot be fat-fingered ------------------------------
 
 #[test]
-fn a_and_r_do_nothing_but_explain_on_the_list_screens() {
-    for screen_key in ['1', '2'] {
-        let mut app = with_pending();
-        app.handle_key(key(screen_key));
-        for k in ['a', 'r'] {
-            assert!(app.handle_key(key(k)).is_empty() && app.confirm.is_none());
-            let n = app.active_notice().expect("it says why");
-            assert!(n.text.contains("open the incident") && n.is_error, "{}", n.text);
-        }
+fn a_and_r_on_the_incident_list_only_explain_and_elsewhere_they_never_decide() {
+    // the Incidents list: they explain, they decide nothing
+    let mut app = with_pending();
+    app.handle_key(key('2'));
+    for k in ['a', 'r'] {
+        assert!(app.handle_key(key(k)).is_empty() && app.confirm.is_none());
+        let n = app.active_notice().expect("it says why");
+        assert!(n.text.contains("open the incident") && n.is_error, "{}", n.text);
     }
+    // Home (and the other areas): they are quick actions, and never open a decision
+    let mut app = with_pending();
+    assert!(app.handle_key(key('a')).is_empty() && matches!(app.screen, Screen::Audit) && app.confirm.is_none());
+    let mut app = with_pending();
+    assert_eq!(app.handle_key(key('r')), vec![Effect::StartPractice]);       // runs a recovery test
+    assert!(app.confirm.is_none() && app.busy.is_none(), "R on Home never rejects an incident");
 }
 
 #[test]
