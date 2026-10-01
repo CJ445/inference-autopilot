@@ -6,7 +6,7 @@ use std::time::Duration;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
-use crate::http::{request_with, Endpoint, HttpError};
+use crate::http::{request_json, Endpoint, HttpError};
 use crate::model::{
     Audit, ConfigInfo, Diagnostics, Incident, IncidentList, Status, StopAck, VersionInfo,
 };
@@ -111,7 +111,17 @@ impl Client {
         path: &str,
         headers: &[(&str, &str)],
     ) -> Result<T, ApiError> {
-        let response = request_with(&self.endpoint, method, path, headers, self.connect, self.total)?;
+        self.call_body(method, path, headers, "")
+    }
+
+    fn call_body<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> Result<T, ApiError> {
+        let response = request_json(&self.endpoint, method, path, headers, body, self.connect, self.total)?;
         if !(200..300).contains(&response.status) {
             return Err(match serde_json::from_str::<ErrorBody>(&response.body) {
                 Ok(e) => ApiError::Server {
@@ -203,5 +213,29 @@ impl Client {
 
     pub fn practice_stop(&self) -> Result<(), ApiError> {
         self.practice_call("stop")
+    }
+
+    // ---- the guarded REAL fault (testing only). The server enforces every safety rule; this only
+    // ---- asks, with the explicit confirmation header, and never names anything but the workload.
+
+    /// Asks the server to pause the managed workload for `seconds`. The server validates the
+    /// target, the duration and the workload's identity, and always ends the fault by itself.
+    pub fn fault_pause(&self, target: &str, seconds: u32) -> Result<(), ApiError> {
+        let body = serde_json::json!({
+            "type": "pause_workload", "target": target, "duration_seconds": seconds,
+        })
+        .to_string();
+        self.call_body::<serde_json::Value>(
+            "POST",
+            "/api/v1/faults",
+            &[("X-Aiops-Confirm", "inject-fault")],
+            &body,
+        )
+        .map(|_| ())
+    }
+
+    /// Resume the workload now (resuming is always safe, so it needs no confirmation).
+    pub fn fault_resume(&self) -> Result<(), ApiError> {
+        self.call::<serde_json::Value>("POST", "/api/v1/faults/cancel").map(|_| ())
     }
 }

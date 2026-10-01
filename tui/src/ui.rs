@@ -156,10 +156,12 @@ pub fn render(f: &mut Frame, app: &App) {
         f.render_widget(Paragraph::new(msg).style(fg(WARNING)), area);
         return;
     }
-    // While practicing, a loud one-line banner sits under the header on EVERY screen.
+    // While practicing (amber) or while a REAL fault is active (red), a loud one-line banner sits
+    // under the header on EVERY screen.
+    let banner = app.practice || app.active_fault().is_some();
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(if app.practice {
+        .constraints(if banner {
             vec![Constraint::Length(3), Constraint::Length(1), Constraint::Min(5), Constraint::Length(1)]
         } else {
             vec![Constraint::Length(3), Constraint::Min(5), Constraint::Length(1)]
@@ -168,8 +170,10 @@ pub fn render(f: &mut Frame, app: &App) {
     header(f, rows[0], app);
     if app.practice {
         practice_banner(f, rows[1], app);
+    } else if banner {
+        fault_banner(f, rows[1], app);
     }
-    let (main, foot) = if app.practice { (rows[2], rows[3]) } else { (rows[1], rows[2]) };
+    let (main, foot) = if banner { (rows[2], rows[3]) } else { (rows[1], rows[2]) };
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(SIDEBAR_W), Constraint::Min(20)])
@@ -202,6 +206,8 @@ pub fn render(f: &mut Frame, app: &App) {
         confirm_modal(f, area, app);
     } else if app.stop_confirm {
         stop_modal(f, area, app);
+    } else if app.fault_confirm {
+        fault_modal(f, area, app);
     } else if app.palette.is_some() {
         palette_modal(f, area, app);
     }
@@ -450,6 +456,56 @@ fn practice_guide(app: &App) -> Vec<Line<'static>> {
         Some(other) => format!("The incident closed as {other}. Press P to practice again, or Esc to leave."),
     };
     vec![Line::from(vec![plain(" "), bold("Practice  ", WARNING), plain(text)])]
+}
+
+/// A REAL fault is in progress: the workload is paused. Red, on every screen, with the time left.
+fn fault_banner(f: &mut Frame, area: Rect, app: &App) {
+    let left = app.active_fault().map_or(0.0, |a| (a.expires_at - app.wall).max(0.0));
+    let when = if left < 1.0 {
+        "is resuming now".to_string()
+    } else if left < 120.0 {
+        format!("resumes by itself in {left:.0}s")
+    } else {
+        format!("resumes by itself in {}m {:02}s", left as u64 / 60, left as u64 % 60)
+    };
+    let style = Style::default().fg(Color::Black).bg(CRITICAL).add_modifier(Modifier::BOLD);
+    // The facts always fit; the hint for ending it sooner is added only when there is room.
+    let base = format!(" LIVE · GPU-REAL · FAULT ACTIVE   The real workload is paused; it {when}.");
+    let full = format!("{base}  Ctrl+P → Resume the workload now");
+    let text = if full.chars().count() <= area.width as usize { full } else { base };
+    let pad = " ".repeat((area.width as usize).saturating_sub(text.chars().count()));
+    f.render_widget(Paragraph::new(Line::from(Span::styled(format!("{text}{pad}"), style))), area);
+}
+
+/// The dialog that stands between the operator and pausing the REAL workload.
+fn fault_modal(f: &mut Frame, area: Rect, app: &App) {
+    let rect = centered(area, 70, 13);
+    f.render_widget(Clear, rect);
+    let minutes = crate::app::FAULT_SECONDS / 60;
+    let target = app.snapshot.as_ref().and_then(|s| s.status.info.workload.clone()).unwrap_or_else(|| "N/A".into());
+    let armed = app.now.saturating_duration_since(app.fault_opened) >= CONFIRM_GUARD;
+    let lines = vec![
+        Line::from(bold(" Pause the real workload?", WARNING)),
+        Line::from(vec![plain(" "), bold("LIVE · GPU-REAL", CRITICAL)]),
+        blank(),
+        Line::from(" This will pause the real inference workload."),
+        Line::from(" It will stop answering until it is automatically resumed"),
+        Line::from(format!(" (in {minutes} minutes) or the recovery flow restarts it.")),
+        Line::from(muted(" Nothing else is touched.")),
+        blank(),
+        row_kv("Workload", &target),
+        blank(),
+        Line::from(vec![
+            plain(" "),
+            if armed { span("[Enter] Confirm", ACCENT) } else { muted("[Enter] Confirm") },
+            span("   [Esc] Cancel", ACCENT),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(lines).block(modal_block("Confirm", CRITICAL)), rect);
+}
+
+fn row_kv(label: &str, value: &str) -> Line<'static> {
+    Line::from(vec![plain(" "), muted(format!("{label:<10}")), plain(value.to_string())])
 }
 
 /// The loud one-line label shown on every screen while a simulation is on screen.
@@ -1319,6 +1375,10 @@ fn help(f: &mut Frame, area: Rect, app: &App) {
     l.push(rule("How it fits together", None, w));
     l.push(Line::from(muted(" Workload remediation: incident → policy → your approval (A) → the server")));
     l.push(Line::from(muted(" executes and verifies it. Stopping the control plane is separate (screen 4).")));
+    l.push(blank());
+    l.push(rule("Testing the real system", None, w));
+    l.push(Line::from(muted(" Ctrl+P, then \"Break the real workload (pause)…\" asks first, pauses the real")));
+    l.push(Line::from(muted(" workload for a bounded time and always resumes it. Use Practice (P) to try safely.")));
     f.render_widget(Paragraph::new(l).scroll((app.scroll, 0)), area);
 }
 
@@ -1347,7 +1407,7 @@ fn stop_modal(f: &mut Frame, area: Rect, app: &App) {
 
 fn palette_modal(f: &mut Frame, area: Rect, app: &App) {
     let Some(p) = &app.palette else { return };
-    let items = p.matches(app.practice);
+    let items = p.matches(app.offer());
     let h = (items.len().max(1) as u16 + 4).min(area.height.saturating_sub(2));
     let w = 56.min(area.width.saturating_sub(4));
     let rect = Rect { x: area.x + (area.width - w) / 2, y: area.y + 2, width: w, height: h };

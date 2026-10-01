@@ -103,11 +103,26 @@ pub enum Command {
     StopControlPlane,
     Practice,
     ExitPractice,
+    BreakWorkload,
+    ResumeWorkload,
     Quit,
 }
 
+/// What the palette may offer right now (it never lists what cannot be done).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Offer {
+    pub practicing: bool,
+    /// The server offers the guarded real fault, none is active, and this is the real system.
+    pub can_break: bool,
+    /// A real fault is active and can be ended now.
+    pub can_resume: bool,
+}
+
+/// How long the paused workload is told to stay paused at most (the server bounds this too).
+pub const FAULT_SECONDS: u32 = 120;
+
 impl Command {
-    pub const ALL: [Command; 13] = [
+    pub const ALL: [Command; 15] = [
         Command::Overview,
         Command::Incidents,
         Command::Audit,
@@ -120,6 +135,8 @@ impl Command {
         Command::StopControlPlane,
         Command::Practice,
         Command::ExitPractice,
+        Command::BreakWorkload,
+        Command::ResumeWorkload,
         Command::Quit,
     ];
 
@@ -137,6 +154,8 @@ impl Command {
             Command::StopControlPlane => "Stop control plane…",
             Command::Practice => "Practice an incident",
             Command::ExitPractice => "Exit practice",
+            Command::BreakWorkload => "Break the real workload (pause)…",
+            Command::ResumeWorkload => "Resume the workload now",
             Command::Quit => "Quit",
         }
     }
@@ -150,12 +169,17 @@ pub struct Palette {
 
 impl Palette {
     /// Commands whose label contains every word of the query (case-insensitive).
-    pub fn matches(&self, practicing: bool) -> Vec<Command> {
+    pub fn matches(&self, offer: Offer) -> Vec<Command> {
         let q = self.query.to_lowercase();
         let words: Vec<&str> = q.split_whitespace().collect();
         Command::ALL
             .into_iter()
-            .filter(|c| practicing || *c != Command::ExitPractice) // only offered while practicing
+            .filter(|c| match c {
+                Command::ExitPractice => offer.practicing,
+                Command::BreakWorkload => offer.can_break,
+                Command::ResumeWorkload => offer.can_resume,
+                _ => true,
+            })
             .filter(|c| {
                 let label = c.label().to_lowercase();
                 words.iter().all(|w| label.contains(w))
@@ -255,6 +279,9 @@ pub enum Effect {
     StartPractice,
     InjectFault,
     EndPractice,
+    /// A REAL fault: pause the managed workload. Sent only after an explicit confirmation.
+    PauseWorkload { target: String, seconds: u32 },
+    ResumeWorkload,
 }
 
 #[derive(Debug)]
@@ -266,6 +293,8 @@ pub enum Loaded {
     PracticeStarted(Result<(), ApiError>),
     PracticeFault(Result<(), ApiError>),
     PracticeStopped(Result<(), ApiError>),
+    FaultPaused(Result<(), ApiError>),
+    FaultResumed(Result<(), ApiError>),
 }
 
 #[derive(Debug)]
@@ -311,6 +340,9 @@ pub struct App {
     pub practice: bool,
     pub stop_confirm: bool,
     pub stop_opened: Instant,
+    /// The dialog that asks before a REAL workload is paused.
+    pub fault_confirm: bool,
+    pub fault_opened: Instant,
     pub stop_sent: Option<Instant>,
     pub now: Instant,
     pub wall: f64,
@@ -346,6 +378,8 @@ impl App {
             practice: false,
             stop_confirm: false,
             stop_opened: Instant::now(),
+            fault_confirm: false,
+            fault_opened: Instant::now(),
             stop_sent: None,
             now: Instant::now(),
             wall: wall_clock(),
@@ -457,6 +491,21 @@ impl App {
             }
             return Vec::new();
         }
+        if self.fault_confirm {
+            match key.code {
+                KeyCode::Enter if self.now.saturating_duration_since(self.fault_opened) < CONFIRM_GUARD => {}
+                KeyCode::Enter => {
+                    self.fault_confirm = false;
+                    return match self.fault_target() {
+                        Some(target) => vec![Effect::PauseWorkload { target, seconds: FAULT_SECONDS }],
+                        None => Vec::new(),
+                    };
+                }
+                KeyCode::Esc => self.fault_confirm = false,
+                _ => {}
+            }
+            return Vec::new();
+        }
         if self.palette.is_some() {
             return self.palette_key(key);
         }
@@ -526,7 +575,7 @@ impl App {
     }
 
     fn palette_key(&mut self, key: KeyEvent) -> Vec<Effect> {
-        let practicing = self.practice;
+        let offer = self.offer();
         let Some(p) = self.palette.as_mut() else { return Vec::new() };
         match key.code {
             KeyCode::Esc => self.palette = None,
@@ -536,7 +585,7 @@ impl App {
             }
             KeyCode::Up => p.selected = p.selected.saturating_sub(1),
             KeyCode::Down => {
-                let last = p.matches(practicing).len().saturating_sub(1);
+                let last = p.matches(offer).len().saturating_sub(1);
                 p.selected = (p.selected + 1).min(last);
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -544,7 +593,7 @@ impl App {
                 p.selected = 0;
             }
             KeyCode::Enter => {
-                let chosen = p.matches(practicing).get(p.selected).copied();
+                let chosen = p.matches(offer).get(p.selected).copied();
                 self.palette = None;
                 if let Some(cmd) = chosen {
                     return self.run(cmd);
@@ -573,8 +622,57 @@ impl App {
             }
             Command::Practice => self.begin_practice(),
             Command::ExitPractice => vec![Effect::EndPractice],
+            Command::BreakWorkload => {
+                self.begin_fault();
+                Vec::new()
+            }
+            Command::ResumeWorkload => {
+                if self.offer().can_resume {
+                    vec![Effect::ResumeWorkload]
+                } else {
+                    self.say("no fault is active", true);
+                    Vec::new()
+                }
+            }
             Command::Quit => vec![Effect::Quit],
         }
+    }
+
+    pub fn offer(&self) -> Offer {
+        let faults = self.snapshot.as_ref().and_then(|s| s.status.faults.as_ref());
+        let online = matches!(self.conn, Conn::Online);
+        Offer {
+            practicing: self.practice,
+            can_break: online
+                && !self.practice
+                && faults.map_or(false, |f| f.available && f.active.is_none()),
+            can_resume: online && !self.practice && faults.map_or(false, |f| f.active.is_some()),
+        }
+    }
+
+    /// The workload the server says it manages: the only thing a fault may ever name.
+    fn fault_target(&self) -> Option<String> {
+        self.snapshot.as_ref()?.status.info.workload.clone()
+    }
+
+    /// Opens the confirmation. Nothing is sent until the operator presses Enter on it.
+    fn begin_fault(&mut self) {
+        if !self.offer().can_break {
+            return self.say("a real fault is not available right now", true);
+        }
+        if self.fault_target().is_none() {
+            return self.say("the control plane did not name its workload; nothing to pause", true);
+        }
+        self.fault_confirm = true;
+        self.fault_opened = self.now;
+    }
+
+    /// The fault in progress, if any, from the server's last report.
+    pub fn active_fault(&self) -> Option<&crate::model::ActiveFault> {
+        if self.practice {
+            return None;
+        }
+        self.snapshot.as_ref()?.status.faults.as_ref()?.active.as_ref()
     }
 
     /// Asks the server for a fresh practice session (replacing any current one).
@@ -808,6 +906,19 @@ impl App {
                     Err(e) => self.say(&format!("left practice (the server did not confirm: {e})"), true),
                 }
             }
+            Loaded::FaultPaused(Ok(())) => self.say(
+                "the real workload is paused; it resumes by itself (Ctrl+P, then Resume the workload now, ends it sooner)",
+                false,
+            ),
+            Loaded::FaultPaused(Err(ApiError::Server { message, .. })) => {
+                self.say(&format!("the fault was refused: {message}"), true)
+            }
+            Loaded::FaultPaused(Err(_)) => self.say(
+                "no answer to the fault request: check the workload; a fault that did start ends by itself",
+                true,
+            ),
+            Loaded::FaultResumed(Ok(())) => self.say("the workload was resumed", false),
+            Loaded::FaultResumed(Err(e)) => self.say(&format!("could not resume the workload: {e}"), true),
             Loaded::Stop(Err(_)) => self.say(
                 "no answer to the stop request: the control plane may already be stopping; check its state",
                 true,

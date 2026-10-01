@@ -445,3 +445,76 @@ fn the_practice_status_shape_parses_with_its_mode_and_stage() {
     assert_eq!(s.mode.as_deref(), Some("SIMULATION"));
     assert_eq!(s.practice.unwrap().stage, "awaiting_approval");
 }
+
+// --- the guarded REAL fault: explicit confirmation, a validated body, never anything else ------------------
+
+#[test]
+fn a_fault_request_is_one_post_with_the_confirmation_header_and_a_json_body() {
+    let f = fake(vec![Reply::Raw(http(202, r#"{"injected": true, "active": {"status": "ACTIVE"}}"#))]);
+    f.client().fault_pause("vllm", 120).unwrap();
+    assert_eq!(f.requests(), vec!["POST /api/v1/faults HTTP/1.1"]);
+    let head = f.heads()[0].to_lowercase();
+    assert!(head.contains("x-aiops-confirm: inject-fault"));
+    assert!(head.contains("content-type: application/json"));
+    assert!(head.contains("content-length: 63") || head.contains("content-length:"), "{head}");
+}
+
+#[test]
+fn the_fault_body_carries_only_the_type_the_target_and_the_duration() {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut got = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = conn.read(&mut buf).unwrap();
+            got.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&got).to_string();
+            if let Some(split) = text.find("\r\n\r\n") {
+                let len: usize = text.to_lowercase().split("content-length: ").nth(1).unwrap()
+                    .split("\r\n").next().unwrap().trim().parse().unwrap();
+                if got.len() >= split + 4 + len {
+                    break;
+                }
+            }
+        }
+        let _ = conn.write_all(&http(202, r#"{"injected": true}"#));
+        String::from_utf8_lossy(&got).to_string()
+    });
+    Client::new(&format!("http://127.0.0.1:{port}")).unwrap().fault_pause("vllm", 120).unwrap();
+    let request = server.join().unwrap();
+    let body = request.split("\r\n\r\n").nth(1).unwrap();
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(v, serde_json::json!({"type": "pause_workload", "target": "vllm", "duration_seconds": 120}));
+}
+
+#[test]
+fn resuming_is_a_plain_post_and_a_refused_fault_surfaces_the_servers_error() {
+    let f = fake(vec![
+        Reply::Raw(http(200, r#"{"available": true, "active": null}"#)),
+        Reply::Raw(http(
+            409,
+            r#"{"error": {"code": "FAULT_ACTIVE", "message": "a fault is already active", "request_id": "r"}}"#,
+        )),
+    ]);
+    let c = f.client();
+    c.fault_resume().unwrap();
+    match c.fault_pause("vllm", 60) {
+        Err(ApiError::Server { status: 409, code, message }) => {
+            assert_eq!(code, "FAULT_ACTIVE");
+            assert!(message.contains("already active"));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(f.requests(), vec!["POST /api/v1/faults/cancel HTTP/1.1", "POST /api/v1/faults HTTP/1.1"]);
+}
+
+#[test]
+fn a_timed_out_fault_request_is_never_resent() {
+    let f = fake(vec![Reply::After(Duration::from_millis(1500), http(202, r#"{"injected": true}"#))]);
+    assert_eq!(f.client().fault_pause("vllm", 60).unwrap_err(), ApiError::Timeout);
+    thread::sleep(Duration::from_millis(1800));
+    assert_eq!(f.requests().len(), 1, "no automatic retry of a mutation");
+}

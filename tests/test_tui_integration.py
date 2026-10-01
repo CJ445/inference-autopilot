@@ -14,6 +14,7 @@ import signal
 import socket
 import struct
 import subprocess
+import tempfile
 import termios
 import threading
 import time
@@ -21,10 +22,13 @@ import urllib.request
 from pathlib import Path
 
 import pytest
+from faults_support import FakeDocker, live_reaper
 from term_screen import VScreen
 from test_engine import CONFIG, World
 
 from aiops.engine import Engine
+from aiops.faults.core import AllowlistedDocker
+from aiops.faults.injector import FaultInjector
 from aiops.practice import PracticeHost
 from aiops.serve import Service
 from aiops.system import System
@@ -74,15 +78,24 @@ class ControlPlane:
                  "blocking": False},
                 {"check": "kubectl", "status": "NOT_APPLICABLE", "detail": "n/a", "blocking": False}])
         self.practice = PracticeHost(tick_seconds=0.1, verify_timeout=1)
+        # the guarded real fault, over a fake container runtime: no real container exists here
+        self._fault_dir = tempfile.TemporaryDirectory()
+        self.fault_docker = FakeDocker(workload="vllm-0")
+        self.faults = FaultInjector("vllm-0", Path(self._fault_dir.name) / "fault.json",
+                                    run=AllowlistedDocker("vllm-0", run=self.fault_docker),
+                                    spawn=live_reaper)
         self.service = Service(self.engine, port=self.port, interval=0.2, system=self.system,
-                               practice=self.practice,
+                               practice=self.practice, faults=self.faults,
                                info={"profile": "stand-in", "provider": "kubernetes",
                                      "workload": "vllm-0", "pid": os.getpid()},
                                status_extra=lambda: {"watchdog": {
                                    "state": "armed", "pid": 1, "protected_pid": os.getpid(),
                                    "limits": {"max_ram_percent": 90},
                                    "last_sample": {"ram_percent": 40.0},
-                                   "last_check_age_seconds": 0.2}})
+                                   "last_check_age_seconds": 0.2},
+                                   "faults": self.faults.summary()})
+        self.faults.audit = self.service.record
+        self.faults.start_monitor(0.2)
         self.service.start()
         return self
 
@@ -604,5 +617,57 @@ def test_practice_walks_the_whole_loop_in_the_tui_without_touching_the_real_syst
     assert "PRACTICE" not in t.screen() and "SIMULATION" not in t.screen()
     assert cp.practice.session is None                             # and the simulation was discarded
     assert cp.world.restarts == 0
+    t.send(b"q")
+    assert t.proc.wait(timeout=10) == 0
+
+
+def test_the_real_fault_needs_an_explicit_confirmation_and_is_visible_until_it_ends(term, cp):
+    t = term(cp.url, rows=36, cols=130)
+    assert t.wait_screen("inc_001")
+    docker = cp.fault_docker
+
+    def open_dialog():
+        t.send(b"\x10")                                           # Ctrl+P
+        assert t.wait_screen("Search commands")
+        t.send(b"break")
+        assert t.wait_screen("Break the real workload (pause)…")
+        t.send(b"\r")
+        assert t.wait_screen("Pause the real workload?") and t.wait_screen("LIVE · GPU-REAL")
+
+    open_dialog()
+    assert t.wait_screen("stop answering until it is automatically resumed")
+    time.sleep(0.8)
+    assert not docker.main.paused and cp.faults.lease_or_none() is None   # the dialog alone does nothing
+    t.send(b"\x1b")                                                       # Esc cancels
+    time.sleep(0.8)
+    assert not docker.main.paused and cp.faults.lease_or_none() is None
+
+    open_dialog()
+    time.sleep(0.8)
+    t.send(b"\r")                                                         # the explicit confirmation
+    assert t.wait_screen("LIVE · GPU-REAL · FAULT ACTIVE")
+    assert docker.main.paused and cp.faults.lease_or_none()["status"] == "ACTIVE"
+    t.send(b"3")
+    assert t.wait_screen("FAULT ACTIVE") and t.wait_screen("Audit log")   # on every screen
+    assert cp.world.restarts == 0                                         # a fault is not a remediation
+
+    t.send(b"\x10")
+    assert t.wait_screen("Search commands")
+    t.send(b"resume")
+    assert t.wait_screen("Resume the workload now")
+    t.send(b"\r")
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and "FAULT ACTIVE" in t.screen():
+        t.pump(0.2)
+    assert "FAULT ACTIVE" not in t.screen() and not docker.main.paused
+    lease = cp.faults.lease_or_none()
+    assert lease["status"] == "RECOVERED" and lease["recovery"]["by"] == "operator"
+    wait_until = time.monotonic() + 10
+    while time.monotonic() < wait_until and [e["event"] for e in cp.engine.audit.events
+                                              if e["event"].startswith("fault_")] != ["fault_injected", "fault_ended"]:
+        time.sleep(0.2)
+    assert [e["event"] for e in cp.engine.audit.events if e["event"].startswith("fault_")] == [
+        "fault_injected", "fault_ended"]                                   # audited once each, in order
+    assert cp.engine.audit.verify()
     t.send(b"q")
     assert t.proc.wait(timeout=10) == 0

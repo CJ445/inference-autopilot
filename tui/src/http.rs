@@ -78,6 +78,19 @@ pub fn request_with(
     connect: Duration,
     total: Duration,
 ) -> Result<Response, HttpError> {
+    request_json(ep, method, path, headers, "", connect, total)
+}
+
+/// As `request_with`, carrying a small JSON body (empty for none).
+pub fn request_json(
+    ep: &Endpoint,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+    connect: Duration,
+    total: Duration,
+) -> Result<Response, HttpError> {
     if headers.iter().any(|(n, v)| n.contains(['\r', '\n', ':']) || v.contains(['\r', '\n'])) {
         return Err(HttpError::BadUrl("header contains a control character".into()));
     }
@@ -106,13 +119,19 @@ pub fn request_with(
     let mut stream = stream.ok_or(last)?;
     let deadline = Instant::now() + total;
     let _ = stream.set_write_timeout(Some(total));
-    let length = if method == "POST" { "Content-Length: 0\r\n" } else { "" };
+    let length = if method == "POST" {
+        format!("Content-Length: {}\r\n", body.len())
+    } else {
+        String::new()
+    };
+    let kind = if body.is_empty() { "" } else { "Content-Type: application/json\r\n" };
     let head = format!(
         "{method} {path} HTTP/1.1\r\nHost: {}:{}\r\nUser-Agent: aiops-tui/0.1\r\n\
-         Accept: application/json\r\nConnection: close\r\n{length}{extra}\r\n",
+         Accept: application/json\r\nConnection: close\r\n{length}{kind}{extra}\r\n",
         ep.host, ep.port
     );
     stream.write_all(head.as_bytes()).map_err(|e| HttpError::Io(e.to_string()))?;
+    stream.write_all(body.as_bytes()).map_err(|e| HttpError::Io(e.to_string()))?;
 
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 8192];

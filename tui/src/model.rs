@@ -32,6 +32,28 @@ pub struct Status {
     /// Present only in a practice session: where the simulated loop is.
     #[serde(default)]
     pub practice: Option<PracticeInfo>,
+    /// Present only where the control plane offers the guarded real fault.
+    #[serde(default)]
+    pub faults: Option<FaultsInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FaultsInfo {
+    #[serde(default)]
+    pub available: bool,
+    #[serde(default)]
+    pub active: Option<ActiveFault>,
+}
+
+/// A real fault in progress: the workload is paused until `expires_at` (epoch seconds) at the latest.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActiveFault {
+    pub fault_id: String,
+    #[serde(default)]
+    pub status: String,
+    pub expires_at: f64,
+    #[serde(default)]
+    pub workload: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

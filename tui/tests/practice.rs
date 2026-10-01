@@ -217,7 +217,7 @@ fn a_decision_in_practice_is_marked_as_simulated_and_a_real_one_is_not() {
 fn the_palette_offers_practice_and_only_offers_exit_while_practicing() {
     let mut a = real_app();
     a.handle_key(ctrl('p'));
-    let words = |a: &App| -> Vec<Command> { a.palette.as_ref().unwrap().matches(a.practice) };
+    let words = |a: &App| -> Vec<Command> { a.palette.as_ref().unwrap().matches(a.offer()) };
     assert!(words(&a).contains(&Command::Practice) && !words(&a).contains(&Command::ExitPractice));
     has(&screen(&a), "Practice an incident");
     lacks(&screen(&a), "Exit practice");

@@ -118,7 +118,10 @@ fn fetch(client: &Client, want: &Interest) -> Result<Snapshot, ApiError> {
 }
 
 /// A one-shot, read-only request on its own thread (the poller is never blocked by it).
-fn spawn_call(client: &Client, total: Duration, tx: Sender<Msg>, call: fn(&Client) -> Loaded) {
+fn spawn_call<F>(client: &Client, total: Duration, tx: Sender<Msg>, call: F)
+where
+    F: FnOnce(&Client) -> Loaded + Send + 'static,
+{
     let client = client.clone().with_timeouts(Duration::from_secs(1), total);
     thread::spawn(move || {
         let _ = tx.send(Msg::Loaded(call(&client)));
@@ -265,6 +268,17 @@ fn interactive(o: &Opts) -> Result<(), String> {
                                 // sent exactly once per confirmation; there is no retry anywhere
                                 Effect::StopControlPlane => {
                                     spawn_call(&client, Duration::from_secs(10), tx.clone(), |c| Loaded::Stop(c.stop_control_plane()))
+                                }
+                                // A REAL fault: sent once, after the operator confirmed the dialog.
+                                Effect::PauseWorkload { target, seconds } => {
+                                    spawn_call(&client, Duration::from_secs(20), tx.clone(), move |c| {
+                                        Loaded::FaultPaused(c.fault_pause(&target, seconds))
+                                    })
+                                }
+                                Effect::ResumeWorkload => {
+                                    spawn_call(&client, Duration::from_secs(20), tx.clone(), |c| {
+                                        Loaded::FaultResumed(c.fault_resume())
+                                    })
                                 }
                                 Effect::StartPractice => spawn_call(&client, Duration::from_secs(10), tx.clone(), |c| {
                                     Loaded::PracticeStarted(c.practice_start())

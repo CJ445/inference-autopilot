@@ -267,7 +267,7 @@ fn the_palette_filters_navigates_and_executes() {
     for c in "diag".chars() {
         a.handle_key(key(c));
     }
-    assert_eq!(a.palette.as_ref().unwrap().matches(false), vec![Command::Diagnostics]);
+    assert_eq!(a.palette.as_ref().unwrap().matches(Default::default()), vec![Command::Diagnostics]);
     assert_eq!(a.handle_key(code(KeyCode::Enter)), vec![Effect::RunDiagnostics]);
     assert!(a.palette.is_none() && matches!(a.screen, Screen::Diagnostics));
 
@@ -318,11 +318,17 @@ fn the_palette_stop_command_only_opens_the_same_confirmation() {
 }
 
 #[test]
-fn the_palette_offers_no_approve_reject_or_workload_command() {
+fn the_palette_offers_no_approve_reject_restart_or_remediation_command() {
+    // Deciding and remediating happen on an incident's own page, never from the palette. The only
+    // palette commands that mention the workload are the two guarded fault commands (pause and
+    // resume), which are testing tools, not remediation.
     for c in Command::ALL {
         let l = c.label().to_lowercase();
-        for forbidden in ["approve", "reject", "restart", "remediat", "workload"] {
+        for forbidden in ["approve", "reject", "restart", "remediat"] {
             assert!(!l.contains(forbidden), "{l}");
+        }
+        if l.contains("workload") {
+            assert!(matches!(c, Command::BreakWorkload | Command::ResumeWorkload), "{l}");
         }
     }
 }
