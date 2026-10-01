@@ -9,11 +9,12 @@ from aiops.api import make_server
 from aiops.runtime import QUERIES, build_engine  # noqa: F401  (QUERIES re-exported)
 
 class Service:
-    def __init__(self, engine, port, interval, info=None, status_extra=None, system=None):
-        self.engine, self.interval = engine, interval
+    def __init__(self, engine, port, interval, info=None, status_extra=None, system=None,
+                 practice=None):
+        self.engine, self.interval, self.practice = engine, interval, practice
         self._lock, self._stop = threading.Lock(), threading.Event()
         self.server = make_server(engine, port=port, lock=self._lock, info=info,  # loopback only
-                                  status_extra=status_extra, system=system)
+                                  status_extra=status_extra, system=system, practice=practice)
         self.port = self.server.server_address[1]
         self._threads = []
 
@@ -28,6 +29,8 @@ class Service:
 
     def stop(self):
         self._stop.set()
+        if self.practice is not None:
+            self.practice.shutdown()
         self.server.shutdown()
         self.server.server_close()
         for t in self._threads:

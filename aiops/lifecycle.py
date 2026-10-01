@@ -26,6 +26,7 @@ from aiops.prometheus import TelemetryError
 from aiops.runtime import build_engine
 from aiops.serve import Service
 from aiops.store import AuditTampered, Store, StoreUnavailable
+from aiops.practice import PracticeHost
 from aiops.system import System
 from aiops.vllm import VllmClient
 from aiops import watchdog as watchdog_module
@@ -246,7 +247,7 @@ def start(config_path, stop_event, out=print, doctor=run_doctor, build=build_eng
     try:
         service = service_cls(engine, port=cp["port"], interval=cp["interval"], info=info,
                               status_extra=lambda: {"watchdog": _watchdog_status(profile)},
-                              system=system)
+                              system=system, practice=PracticeHost())
     except OSError as e:
         out(f"refusing to start: cannot bind 127.0.0.1:{cp['port']}: {e} (is the port in use?)")
         return 1
