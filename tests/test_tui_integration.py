@@ -190,8 +190,8 @@ def once(tui_bin, url, *args):
 
 def test_the_tui_shows_the_live_state_of_the_real_control_plane(term, cp):
     t = term(cp.url)
-    assert t.wait_for("● RUNNING")
-    for needle in ["stand-in", "inc_001", "GPU_MEMORY_PRESSURE", "Awaiting approval",
+    assert t.wait_for("● CONTROL ONLINE")
+    for needle in ["stand-in", "inc_001", "GPU_MEMORY_PRESSURE", "AWAITING APPROVAL",
                    "restart_workload", "● ARMED", "AUDIT ✓ VERIFIED"]:
         assert t.wait_for(needle), needle
 
@@ -200,7 +200,7 @@ def test_confirmation_stands_between_the_keypress_and_the_action(term, cp):
     t = term(cp.url)
     assert t.wait_for("inc_001")
     t.send(b"\r")                                   # inspect
-    assert t.wait_for("INCIDENT inc_001") and t.wait_for("AWAITING APPROVAL")
+    assert t.wait_for("· inc_001 ·") and t.wait_for("AWAITING APPROVAL")
     mark = t.mark()
     t.send(b"a")
     assert t.wait_for("Approve restart_workload?", since=mark)
@@ -231,7 +231,7 @@ def test_approving_through_the_tui_goes_through_the_servers_policy_and_resolves(
     assert t.wait_for("RESOLVED")                   # shown because the server said so
     frame = once(tui_bin, cp.url, "--screen", "detail:inc_001", "--height", "60")
     assert frame.returncode == 0
-    for needle in ["RECOVERY", "✓ Workload identity changed", "RESULT", "RESOLVED"]:
+    for needle in ["Verification", "✓ Workload identity changed", "RESULT", "RESOLVED"]:
         assert needle in frame.stdout, frame.stdout
 
 
@@ -265,7 +265,7 @@ def test_a_server_refusal_is_shown_to_the_operator(term, cp):
 
 def test_q_quits_cleanly_and_restores_the_terminal(term, cp):
     t = term(cp.url)
-    assert t.wait_for("● RUNNING")
+    assert t.wait_for("● CONTROL ONLINE")
     t.send(b"q")
     assert t.proc.wait(timeout=10) == 0
     t.pump(0.3)
@@ -274,7 +274,7 @@ def test_q_quits_cleanly_and_restores_the_terminal(term, cp):
 
 def test_ctrl_c_quits_cleanly(term, cp):
     t = term(cp.url)
-    assert t.wait_for("● RUNNING")
+    assert t.wait_for("● CONTROL ONLINE")
     t.send(b"\x03")
     assert t.proc.wait(timeout=10) == 0
     t.pump(0.3)
@@ -290,14 +290,14 @@ def test_the_tui_waits_for_a_control_plane_that_is_not_up_yet_and_then_recovers(
     plane = ControlPlane(port=port, fault=False).start()
     try:
         mark = t.mark()
-        assert t.wait_for("● RUNNING", since=mark, timeout=15)
+        assert t.wait_for("● CONTROL ONLINE", since=mark, timeout=15)
     finally:
         plane.stop()
 
 
 def test_a_control_plane_that_goes_away_mid_session_is_shown_stale_not_crashed_on(term, cp):
     t = term(cp.url)
-    assert t.wait_for("● RUNNING")
+    assert t.wait_for("● CONTROL ONLINE")
     cp.stop()
     mark = t.mark()
     assert t.wait_for("CONTROL PLANE OFFLINE", since=mark, timeout=15)
@@ -305,7 +305,7 @@ def test_a_control_plane_that_goes_away_mid_session_is_shown_stale_not_crashed_o
     assert t.proc.poll() is None
     cp.start()
     mark = t.mark()
-    assert t.wait_for("● RUNNING", since=mark, timeout=15)
+    assert t.wait_for("● CONTROL ONLINE", since=mark, timeout=15)
 
 
 def test_a_malformed_server_never_crashes_the_tui(term):
@@ -372,7 +372,7 @@ def test_a_slow_server_times_out_and_the_tui_stays_responsive(tui_bin):
 
 def test_resizing_the_terminal_redraws_and_a_tiny_one_degrades_gracefully(term, cp):
     t = term(cp.url)
-    assert t.wait_for("● RUNNING")
+    assert t.wait_for("● CONTROL ONLINE")
     mark = t.mark()
     t.resize(14, 50)
     assert t.wait_for("too small", since=mark)
@@ -384,19 +384,17 @@ def test_resizing_the_terminal_redraws_and_a_tiny_one_degrades_gracefully(term, 
 
 def test_screens_can_be_switched_and_the_audit_log_is_shown(term, cp):
     t = term(cp.url)
-    assert t.wait_for("● RUNNING")
-    mark = t.mark()
+    assert t.wait_for("● CONTROL ONLINE")
     t.send(b"3")
-    assert t.wait_for("AUDIT LOG", since=mark)
-    assert t.wait_for("incident_created", since=mark) and t.wait_for("rca_generated", since=mark)
-    mark = t.mark()
+    assert t.wait_screen("Audit log")      # the emulated screen: ratatui redraws only changed cells
+    assert t.wait_screen("incident_created") and t.wait_screen("rca_generated")
     t.send(b"2")
-    assert t.wait_for("CATEGORY", since=mark) and t.wait_for("inc_001", since=mark)
+    assert t.wait_screen("CATEGORY") and t.wait_screen("inc_001")
 
 
 def test_the_tui_never_starts_another_process(term, cp):
     t = term(cp.url)
-    assert t.wait_for("● RUNNING")
+    assert t.wait_for("● CONTROL ONLINE")
     t.send(b"\r")
     t.send(b"a")
     t.pump(0.5)
@@ -408,7 +406,7 @@ def test_the_tui_never_starts_another_process(term, cp):
 
 def test_once_prints_the_real_state_and_signals_an_unreachable_control_plane(tui_bin, cp):
     ok = once(tui_bin, cp.url)
-    assert ok.returncode == 0 and "inc_001" in ok.stdout and "● RUNNING" in ok.stdout
+    assert ok.returncode == 0 and "inc_001" in ok.stdout and "● CONTROL ONLINE" in ok.stdout
     down = once(tui_bin, f"http://127.0.0.1:{free_port()}", "--height", "24")
     assert down.returncode == 3 and "CONTROL PLANE OFFLINE" in down.stdout
 

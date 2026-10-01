@@ -47,13 +47,13 @@ def test_the_operator_tui_drives_a_real_remediation_end_to_end(vllm, tmp_path, t
         t = Term(tui_bin, f"http://127.0.0.1:{c.port}", rows=52, cols=132)
         try:
             # -- healthy: real GPU, real vLLM, real safety state, all from the API -------------
-            assert t.wait_screen("● RUNNING", timeout=30)
+            assert t.wait_screen("● CONTROL ONLINE", timeout=30)
             for needle in ["docker-real-gpu", "GPU 0", uuid[:12], "VRAM", "GiB", "● HEALTHY",
                            "Probe ✓", "Metrics ✓", "No active incidents", "● ARMED",
                            "Identity ✓", "Budgets ✓", "AUDIT ✓ VERIFIED", f"vLLM · {MODEL}"]:
                 assert t.wait_screen(needle, timeout=20), needle
             healthy = frame(tui_bin, c.port)
-            shown_pct = float(re.search(r"VRAM\s+\S+\s+(\d+\.\d)%", healthy).group(1))
+            shown_pct = float(re.search(r"VRAM\s+\S+ / \S+ GiB\s+(\d+\.\d)%", healthy).group(1))
             shown_temp = float(re.search(r"TEMP\s+(\d+)°C", healthy).group(1))
             now_used, now_total, now_temp = smi("memory.used,memory.total,temperature.gpu")
             assert abs(shown_pct - 100 * now_used / now_total) <= 3     # the REAL GPU, not a value
@@ -65,16 +65,16 @@ def test_the_operator_tui_drives_a_real_remediation_end_to_end(vllm, tmp_path, t
             mark = t.mark()
             assert t.wait_screen("✗ UNRESPONSIVE", timeout=60)
             assert t.wait_screen("INFERENCE_UNRESPONSIVE")
-            assert t.wait_screen("Awaiting approval")
+            assert t.wait_screen("AWAITING APPROVAL")
             assert t.wait_screen("restart_workload")
             assert provider.get_workload("vllm")["id"] == id_before     # nothing restarted
 
             # -- inspect: evidence, RCA, proposal, policy; no causal claim about memory -----------
             t.send(b"\r")
-            for needle in ["INCIDENT inc_001", "EVIDENCE", "vllm-probe", "inference failed",
-                           "RCA", "Inference requests are failing or timing out", "PROPOSAL",
-                           "restart_workload", "workload=vllm", "POLICY", "AWAITING APPROVAL",
-                           "VERIFICATION", "Not started"]:
+            for needle in ["· inc_001 ·", "Evidence", "vllm-probe", "FAILED (timeout)",
+                           "Deterministic RCA", "Inference requests are failing or timing out", "Remediation",
+                           "restart_workload", "workload=vllm", "Policy", "AWAITING APPROVAL",
+                           "Verification", "Not started"]:
                 assert t.wait_screen(needle, timeout=20), needle
             assert "exhaust" not in t.text().lower().split("inference requests are failing")[-1][:200]
 
@@ -93,16 +93,16 @@ def test_the_operator_tui_drives_a_real_remediation_end_to_end(vllm, tmp_path, t
             assert t.wait_screen("RESOLVED", timeout=240)
             seen = t.text(mark)
             assert "VERIFYING" in seen or "EXECUTING" in seen or "Waiting for the server" in seen
-            assert t.wait_screen("RECOVERY", timeout=30)
+            assert t.wait_screen("Verification", timeout=30)
             for needle in ["✓ Workload identity changed", "✓ GPU observable",
                            "✓ vLLM metrics readable", "✓ Stable window of real completions",
-                           "RESULT", "TIMELINE"]:
+                           "RESULT", "Timeline"]:
                 assert t.wait_screen(needle, timeout=30), needle
             final = frame(tui_bin, c.port, "--screen", "detail:inc_001")
-            for needle in ["RECOVERY", "✓ Workload identity changed", "RESOLVED", "EXECUTING",
+            for needle in ["Verification", "✓ Workload identity changed", "RESOLVED", "EXECUTING",
                            "VERIFYING"]:
                 assert needle in final, final
-            assert "✗" not in final.split("RECOVERY")[1].split("TIMELINE")[0]
+            assert "✗" not in final.split("Verification")[1].split("Timeline")[0]
 
             # -- independent proof, from the real infrastructure and the real audit ----------------
             assert provider.get_workload("vllm")["id"] != id_before     # genuinely restarted

@@ -5,6 +5,7 @@ use aiops_tui::model::{Audit, Incident, Status};
 use aiops_tui::ui;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
+use aiops_tui::theme;
 use ratatui::style::Color;
 
 const HEALTHY: &str = include_str!("fixtures/status_healthy.json");
@@ -71,11 +72,12 @@ fn a_healthy_dashboard_shows_real_gpu_vllm_control_plane_and_safety_state() {
     let a = app(HEALTHY, vec![]);
     let s = text(&a, 110, 32);
     for needle in [
-        "INFERENCE AUTOPILOT", "● RUNNING", "docker-real-gpu", "GPU 0", "GPU-1e5dd8d1", "VRAM",
+        "INFERENCE AUTOPILOT", "● CONTROL ONLINE", "docker-real-gpu", "GPU 0", "GPU-1e5dd8d1", "VRAM",
         "35.4%", "2.8 / 8.0 GiB", "59°C", "UTIL 23%", "vLLM · facebook/opt-125m", "● HEALTHY",
         "Probe ✓", "18 ms", "Metrics ✓", "KV cache 0.0%", "Running 0", "Waiting 0",
         "No active incidents", "WATCHDOG", "● ARMED", "Identity ✓", "Budgets ✓",
-        "AUDIT ✓ VERIFIED", "Navigate", "Approve", "Reject", "Quit",
+        "AUDIT ✓ VERIFIED", "Observed 1.0s ago", "OVERVIEW", "INCIDENTS", "AUDIT",
+        "Navigate", "Approve", "Reject", "Quit",
     ] {
         has(&s, needle);
     }
@@ -106,7 +108,7 @@ fn a_degraded_control_plane_is_not_shown_as_running() {
     st.health = "DEGRADED".into();
     let s = text(&app_with(Snapshot::new(st, vec![])), 110, 32);
     has(&s, "! DEGRADED");
-    lacks(&s, "● RUNNING");
+    lacks(&s, "● CONTROL ONLINE");
 }
 
 #[test]
@@ -119,7 +121,7 @@ fn values_the_server_did_not_send_are_na_never_invented() {
     }
     let s = text(&app_with(Snapshot::new(st, vec![])), 110, 32);
     for needle in ["KV cache N/A", "Running N/A", "Waiting N/A", "Req/min N/A", "Latency N/A",
-                   "TEMP  N/A", "Tokens/s N/A"] {
+                   "TEMP N/A", "Tokens/s N/A"] {
         has(&s, needle);
     }
 }
@@ -131,7 +133,8 @@ fn without_any_observation_the_gpu_and_vllm_panels_say_na() {
     st.last_observed_at = None;
     let s = text(&app_with(Snapshot::new(st, vec![])), 110, 32);
     has(&s, "GPU N/A");
-    has(&s, "VRAM  N/A");
+    has(&s, "VRAM           N/A");
+    has(&s, "No observation");
     lacks(&s, "35.4%");
 }
 
@@ -157,11 +160,11 @@ fn an_unresponsive_workload_is_unmistakable_and_the_incident_is_listed() {
     let a = app(UNRESPONSIVE, vec![incident(PENDING, "inc_001")]);
     let s = text(&a, 110, 32);
     for needle in ["✗ UNRESPONSIVE", "Probe ✗ timeout", "Metrics ✗", "inc_001",
-                   "INFERENCE_UNRESPONSIVE", "Awaiting approval", "restart_workload"] {
+                   "INFERENCE_UNRESPONSIVE", "AWAITING APPROVAL", "restart_workload"] {
         has(&s, needle);
     }
     lacks(&s, "No active incidents");
-    assert_eq!(colour_of(&ui::render_to_buffer(&a, 110, 32), "✗ UNRESPONSIVE"), Color::Red);
+    assert_eq!(colour_of(&ui::render_to_buffer(&a, 110, 32), "✗ UNRESPONSIVE"), theme::CRITICAL);
 }
 
 #[test]
@@ -171,15 +174,16 @@ fn finished_incidents_are_listed_as_recent_with_the_servers_state() {
     has(&s, "RECENT");
     has(&s, "15:02:47");
     has(&s, "→ RESOLVED");
+    has(&s, "RECENT");
     has(&s, "No active incidents");
 }
 
 #[test]
 fn the_selected_incident_is_marked() {
     let mut a = app(UNRESPONSIVE, vec![incident(PENDING, "inc_001"), incident(PENDING, "inc_002")]);
-    has(&text(&a, 110, 32), "> inc_002");
+    has(&text(&a, 110, 32), "› inc_002");
     key(&mut a, KeyCode::Down);
-    has(&text(&a, 110, 32), "> inc_001");
+    has(&text(&a, 110, 32), "› inc_001");
 }
 
 // --- incident list and detail ----------------------------------------------------------------
@@ -188,9 +192,9 @@ fn the_selected_incident_is_marked() {
 fn the_incidents_screen_is_a_compact_table() {
     let mut a = app(UNRESPONSIVE, vec![incident(PENDING, "inc_001"), incident(RESOLVED, "inc_000")]);
     key(&mut a, KeyCode::Tab);
-    let s = text(&a, 120, 24);
-    for needle in ["ID", "CATEGORY", "STATE", "WORKLOAD", "CREATED", "PROPOSAL", "REMEDIATION",
-                   "inc_001", "15:02:11", "vllm", "restart_workload", "Awaiting approval", "RESOLVED"] {
+    let s = text(&a, 140, 24);
+    for needle in ["ID", "CATEGORY", "STATE", "WORKLOAD", "CREATED", "PROPOSAL",
+                   "inc_001", "15:02:11", "vllm", "restart_workload", "● AWAITING APPROVAL", "● RESOLVED"] {
         has(&s, needle);
     }
 }
@@ -208,11 +212,13 @@ fn detail_app(json: &str) -> App {
 fn a_pending_incident_detail_shows_evidence_rca_proposal_policy_and_no_verification() {
     let s = text(&detail_app(PENDING), 110, 60);
     for needle in [
-        "inc_001", "INFERENCE_UNRESPONSIVE", "vllm", "EVIDENCE", "✓ vllm-probe",
-        "inference failed (timeout)", "✓ nvidia-smi", "✓ vllm-metrics", "metrics unavailable",
-        "RCA", "Inference requests are failing or timing out", "PROPOSAL", "restart_workload",
-        "workload=vllm", "POLICY", "AWAITING APPROVAL", "VERIFICATION", "Not started", "TIMELINE",
-        "15:02:11  DETECTED", "15:02:12  POLICY_CHECK",
+        "inc_001", "INFERENCE_UNRESPONSIVE", "vllm", "Evidence", "Inference probe",
+        "FAILED (timeout)", "vllm-probe", "GPU memory", "2.8 GiB used", "vLLM metrics", "UNAVAILABLE",
+        "Deterministic RCA", "Classification", "SUPPORTED", "Inference requests are failing or timing out",
+        "Remediation", "restart_workload", "workload=vllm", "Policy", "APPROVAL REQUIRED", "PENDING",
+        "[ A ] Approve", "[ R ] Reject", "Verification", "Not started", "Timeline",
+        "15:02:11  DETECTED", "15:02:12  POLICY_CHECK", "● AWAITING APPROVAL",
+        "Evidence › RCA › Proposal › Policy › Approval › Execute › Verify › Result",
     ] {
         has(&s, needle);
     }
@@ -222,8 +228,8 @@ fn a_pending_incident_detail_shows_evidence_rca_proposal_policy_and_no_verificat
 fn a_resolved_incident_shows_the_recovery_checks_the_server_recorded() {
     let s = text(&detail_app(RESOLVED), 110, 70);
     for needle in [
-        "RECOVERY", "✓ Workload identity changed", "✓ GPU observable", "✓ vLLM metrics readable",
-        "✓ Stable window of real completions", "RESULT", "RESOLVED", "15:02:18  APPROVED",
+        "Verification", "✓ Workload identity changed", "✓ GPU observable", "✓ vLLM metrics readable",
+        "✓ Stable window of real completions", "RESULT", "● RESOLVED", "15:02:18  APPROVED",
         "15:02:18  EXECUTING", "15:02:22  VERIFYING", "15:02:47  RESOLVED",
     ] {
         has(&s, needle);
@@ -236,7 +242,7 @@ fn a_failed_verification_shows_each_failed_check_and_the_unresolved_result() {
     has(&s, "✗ vLLM metrics readable");
     has(&s, "✗ Stable window of real completions");
     has(&s, "✓ Workload identity changed");
-    has(&s, "UNRESOLVED");
+    has(&s, "● UNRESOLVED");
 }
 
 #[test]
@@ -258,10 +264,11 @@ fn resolved_is_never_claimed_unless_the_server_says_so() {
 #[test]
 fn an_incident_with_insufficient_evidence_says_so_and_offers_no_proposal() {
     let s = text(&detail_app(INSUFFICIENT), 110, 60);
-    has(&s, "INSUFFICIENT_EVIDENCE");
+    has(&s, "INSUFFICIENT EVIDENCE");
     has(&s, "Insufficient evidence");
     has(&s, "No proposal");
     lacks(&s, "AWAITING APPROVAL");
+    lacks(&s, "[ A ] Approve");
 }
 
 #[test]
@@ -316,7 +323,7 @@ fn a_server_refusal_appears_in_the_footer_in_red() {
     });
     let s = text(&a, 130, 32);
     has(&s, "POLICY_DENIED");
-    assert_eq!(colour_of(&ui::render_to_buffer(&a, 130, 32), "Approve failed"), Color::Red);
+    assert_eq!(colour_of(&ui::render_to_buffer(&a, 130, 32), "Approve failed"), theme::CRITICAL);
 }
 
 // --- watchdog and audit visibility --------------------------------------------------------------
@@ -349,7 +356,7 @@ fn every_unavailable_watchdog_state_is_obvious() {
         has(&s, "! UNAVAILABLE");
         has(&s, detail);
         lacks(&s, "● ARMED");
-        assert_eq!(colour_of(&ui::render_to_buffer(&a, 110, 32), "! UNAVAILABLE"), Color::Red, "{state}");
+        assert_eq!(colour_of(&ui::render_to_buffer(&a, 110, 32), "! UNAVAILABLE"), theme::CRITICAL, "{state}");
     }
 }
 
@@ -385,7 +392,7 @@ fn audit_integrity_is_prominent_when_valid_and_alarming_when_not() {
     let ok = app(HEALTHY, vec![]);
     let s = text(&ok, 110, 32);
     has(&s, "AUDIT ✓ VERIFIED");
-    assert_eq!(colour_of(&ui::render_to_buffer(&ok, 110, 32), "AUDIT ✓ VERIFIED"), Color::Green);
+    assert_eq!(colour_of(&ui::render_to_buffer(&ok, 110, 32), "AUDIT ✓ VERIFIED"), theme::HEALTHY);
 
     let mut st = status(HEALTHY);
     st.audit.as_mut().unwrap().valid = false;
@@ -393,7 +400,7 @@ fn audit_integrity_is_prominent_when_valid_and_alarming_when_not() {
     let s = text(&bad, 110, 32);
     has(&s, "AUDIT ✗ INTEGRITY FAILURE");
     has(&s, "Audit ✗");
-    assert_eq!(colour_of(&ui::render_to_buffer(&bad, 110, 32), "AUDIT ✗ INTEGRITY FAILURE"), Color::Red);
+    assert_eq!(colour_of(&ui::render_to_buffer(&bad, 110, 32), "AUDIT ✗ INTEGRITY FAILURE"), theme::CRITICAL);
 }
 
 #[test]
@@ -434,7 +441,7 @@ fn a_control_plane_that_never_answered_shows_connecting_and_no_invented_values()
     let a = App::new("http://127.0.0.1:8080".into());
     let s = text(&a, 100, 30);
     has(&s, "CONNECTING");
-    for invented in ["35.4%", "● RUNNING", "HEALTHY", "AUDIT ✓"] {
+    for invented in ["35.4%", "● CONTROL ONLINE", "HEALTHY", "AUDIT ✓"] {
         lacks(&s, invented);
     }
 }
@@ -447,7 +454,7 @@ fn an_offline_control_plane_is_shown_not_crashed_on() {
     has(&s, "CONTROL PLANE OFFLINE");
     has(&s, "Retrying");
     has(&s, "connection refused");
-    assert_eq!(colour_of(&ui::render_to_buffer(&a, 100, 30), "CONTROL PLANE OFFLINE"), Color::Red);
+    assert_eq!(colour_of(&ui::render_to_buffer(&a, 100, 30), "CONTROL PLANE OFFLINE"), theme::CRITICAL);
 }
 
 #[test]
@@ -458,7 +465,7 @@ fn when_the_control_plane_drops_the_last_values_are_kept_but_marked_stale() {
     has(&s, "CONTROL PLANE OFFLINE");
     has(&s, "STALE");
     has(&s, "35.4%");                  // the last known value, clearly labelled as old
-    lacks(&s, "● RUNNING");
+    lacks(&s, "● CONTROL ONLINE");
 }
 
 #[test]
@@ -513,6 +520,49 @@ fn a_gpu_the_profile_does_not_report_is_unknown_not_a_failure() {
         o.remove(k);
     }
     let s = text(&app_with(Snapshot::new(st, vec![])), 110, 32);
-    has(&s, "GPU ?");
-    lacks(&s, "GPU ✗");
+    has(&s, "GPU N/A");           // unknown, shown as unknown ...
+    lacks(&s, "GPU ✗");           // ... never as a failure
+    lacks(&s, "! UNAVAILABLE");
+}
+
+// --- real-terminal findings: narrow footer, long evidence labels, stale provenance -------------
+
+#[test]
+fn the_footer_never_drops_quit_even_in_a_narrow_terminal() {
+    let a = app(HEALTHY, vec![]);
+    for w in [72, 76, 90] {
+        let s = text(&a, w, 24);
+        let footer = s.lines().last().unwrap();
+        assert!(footer.contains("Q Quit"), "no Quit at {w}: {footer:?}");
+        assert!(footer.chars().count() <= w as usize);
+    }
+}
+
+#[test]
+fn a_and_r_are_visibly_inactive_unless_the_selected_incident_awaits_a_decision() {
+    let key_colour = |a: &App, k: &str| colour_of(&ui::render_to_buffer(a, 110, 32), k);
+    let waiting = app(UNRESPONSIVE, vec![incident(PENDING, "inc_001")]);
+    let resolved = app(HEALTHY, vec![incident(RESOLVED, "inc_001")]);
+    assert_ne!(key_colour(&waiting, "A Approve"), theme::TEXT_MUTED);
+    assert_eq!(key_colour(&resolved, "A Approve"), theme::TEXT_MUTED);
+    assert_eq!(key_colour(&resolved, "R Reject"), theme::TEXT_MUTED);
+}
+
+#[test]
+fn a_long_evidence_label_never_runs_into_its_value() {
+    let mut inc = incident(PENDING, "inc_001");
+    inc.evidence[0].metric = "vllm_allocation_failure_count".into();
+    inc.evidence[0].value = serde_json::json!(5);
+    let mut snap = Snapshot::new(status(UNRESPONSIVE), vec![inc.clone()]);
+    snap.detail = Some(inc);
+    let mut a = app_with(snap);
+    key(&mut a, KeyCode::Enter);
+    has(&text(&a, 110, 60), "vllm allocation failure count  5");
+}
+
+#[test]
+fn a_dropped_connection_labels_the_observation_as_stale() {
+    let mut a = app(HEALTHY, vec![]);
+    a.apply(Msg::Poll(Err(ApiError::Timeout)));
+    has(&text(&a, 110, 32), "Stale · observed");
 }

@@ -390,3 +390,17 @@ fn time_never_runs_backwards_into_a_negative_age() {
     assert_eq!(app.telemetry_age_secs(), Some(0.0));
     let _ = Instant::now();
 }
+
+#[test]
+fn a_client_timeout_on_approve_is_not_reported_as_a_failure_and_is_never_retried() {
+    let mut app = with_pending();
+    app.handle_key(key('a'));
+    assert_eq!(app.handle_key(code(KeyCode::Enter)), vec![Effect::Approve("inc_001".into())]);
+    app.apply(Msg::Action { kind: ActionKind::Approve, id: "inc_001".into(), result: Err(ApiError::Timeout) });
+    let n = app.active_notice().expect("the operator is told");
+    assert!(n.text.contains("may still be working"), "{}", n.text);
+    assert!(!n.text.contains("failed"), "a timeout must not read as a failed action: {}", n.text);
+    assert!(app.busy.is_none() && app.confirm.is_none());
+    // nothing re-sends by itself: only a fresh A + Enter can, and the incident state decides if it is allowed
+    assert!(app.handle_key(key('s')) == vec![Effect::RefreshNow]);
+}
