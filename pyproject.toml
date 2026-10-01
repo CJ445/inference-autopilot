@@ -13,7 +13,7 @@ dependencies = []                   # standard library only, by design
 aiops = "aiops.cli:main"
 
 [tool.setuptools]
-packages = ["aiops"]
+packages = ["aiops", "aiops.sim", "aiops.faults"]
 
 [tool.setuptools.dynamic]
 version = {attr = "aiops.__version__"}

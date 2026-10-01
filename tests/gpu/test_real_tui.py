@@ -18,7 +18,7 @@ from vllm_support import BASE, MODEL, NAME, docker, processes, smi
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from test_real_watchdog import ControlPlane  # noqa: E402
-from test_tui_integration import Term, tui_bin  # noqa: E402,F401  (fixture)
+from test_tui_integration import Term  # noqa: E402
 
 from aiops.docker import DockerProvider  # noqa: E402
 from aiops.store import Store  # noqa: E402

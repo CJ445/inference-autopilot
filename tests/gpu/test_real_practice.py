@@ -17,7 +17,7 @@ import pytest
 from vllm_support import docker, http
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from test_aiops_command import Pty, env_for, tui_bin  # noqa: E402,F401  (fixture)
+from test_aiops_command import Pty, env_for  # noqa: E402
 from test_real_watchdog import ControlPlane, wait_for  # noqa: E402
 
 from aiops import lifecycle  # noqa: E402

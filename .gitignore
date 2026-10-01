@@ -5,3 +5,4 @@ __pycache__/
 tui/target/
 *.egg-info/
 .venv/
+build/

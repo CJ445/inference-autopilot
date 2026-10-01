@@ -143,6 +143,9 @@ def load_profile(path):
     try:
         with open(path, "rb") as f:
             raw = tomllib.load(f)
+    except FileNotFoundError as e:
+        raise ProfileError(f"no configuration found at {path}. Run `aiops` to create one "
+                           "(it offers a default), or pass --config FILE") from e
     except OSError as e:
         raise ProfileError(f"cannot read profile {path}: {e}") from e
     except tomllib.TOMLDecodeError as e:

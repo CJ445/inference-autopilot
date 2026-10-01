@@ -20,13 +20,6 @@ from aiops import lifecycle
 ROOT = Path(__file__).parent.parent
 
 
-@pytest.fixture(scope="module")
-def tui_bin():
-    for variant in ("release", "debug"):
-        p = ROOT / "tui" / "target" / variant / "aiops-tui"
-        if p.exists():
-            return str(p)
-    pytest.skip("the TUI is not built (cargo build --release --manifest-path tui/Cargo.toml)")
 
 
 class Pty:

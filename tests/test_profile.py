@@ -136,7 +136,7 @@ def test_invalid_kubernetes_profiles_are_rejected(tmp_path, edit):
 
 
 def test_missing_and_malformed_files_are_rejected(tmp_path):
-    with pytest.raises(ProfileError, match="cannot read"):
+    with pytest.raises(ProfileError, match="no configuration found"):
         load_profile(tmp_path / "nope.toml")
     with pytest.raises(ProfileError, match="TOML"):
         load_profile(write(tmp_path, "this is = = not toml ["))
@@ -191,3 +191,16 @@ def test_budgets_and_watchdog_tuning_can_be_configured(tmp_path):
 def test_invalid_watchdog_configuration_is_rejected(tmp_path, edit):
     with pytest.raises(ProfileError):
         load_profile(write(tmp_path, edit(DOCKER)))
+
+
+def test_a_missing_configuration_says_what_to_do_not_an_errno(tmp_path):
+    import pytest
+    from aiops.profile import ProfileError, load_profile
+    with pytest.raises(ProfileError) as e:
+        load_profile(tmp_path / "aiops.toml")
+    assert "no configuration found" in str(e.value) and "Run `aiops`" in str(e.value)
+    assert "Errno" not in str(e.value)
+    (tmp_path / "dir.toml").mkdir()                       # unreadable for another reason keeps its cause
+    with pytest.raises(ProfileError) as e:
+        load_profile(tmp_path / "dir.toml")
+    assert "cannot read profile" in str(e.value)

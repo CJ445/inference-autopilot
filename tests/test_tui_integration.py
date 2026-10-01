@@ -37,17 +37,6 @@ ROOT = Path(__file__).parent.parent
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][A-Za-z0-9]|\x1b[=>]")
 
 
-@pytest.fixture(scope="session")
-def tui_bin():
-    for variant in ("release", "debug"):
-        p = ROOT / "tui" / "target" / variant / "aiops-tui"
-        if p.exists():
-            return str(p)
-    if shutil.which("cargo") is None:
-        pytest.skip("cargo is not installed and the TUI is not built")
-    subprocess.run(["cargo", "build", "--release", "--locked", "--manifest-path",
-                    str(ROOT / "tui" / "Cargo.toml")], check=True, capture_output=True, timeout=900)
-    return str(ROOT / "tui" / "target" / "release" / "aiops-tui")
 
 
 def free_port():
