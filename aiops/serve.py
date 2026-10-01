@@ -1,6 +1,7 @@
 """`python -m aiops serve`: the tick loop and the local API in one process."""
 import argparse
 import signal
+import sys
 import threading
 import traceback
 
@@ -57,6 +58,8 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    print("aiops serve: UNMANAGED legacy command: no watchdog, no preflight, no lifecycle state. "
+          "Use `aiops start` for a protected control plane.", file=sys.stderr, flush=True)
     profile = {  # the same builder `aiops start` uses, fed from flags instead of a file
         "name": "kubernetes", "provider": "kubernetes",
         "control_plane": {"db": args.db},

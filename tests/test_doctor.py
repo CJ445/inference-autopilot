@@ -76,6 +76,8 @@ class System:
                 r.stdout = "570.207\n"
             elif any(a.startswith("--query-gpu=uuid") for a in argv):
                 r.stdout = self.gpu_line
+            elif any(a.startswith("--query-gpu=memory.used") for a in argv):
+                r.stdout = "2895, 8188, 59, 0\n"            # the watchdog's own sensor query
             else:
                 raise AssertionError(f"unexpected nvidia-smi command {argv}")
         elif tool == "kubectl":
@@ -119,6 +121,7 @@ def test_a_healthy_docker_real_gpu_setup_passes_every_applicable_check(tmp_path,
         "docker_cli": PASS, "docker_daemon": PASS, "workload": PASS, "nvidia_driver": PASS,
         "gpu": PASS, "gpu_expectations": PASS, "cuda_compat": PASS, "gpu_headroom": PASS,
         "vllm_endpoint": PASS, "vllm_metrics": PASS, "vllm_probe": PASS,
+        "watchdog_identity": PASS, "watchdog_sensors": PASS, "watchdog_state": PASS,
         "kubectl": NOT_APPLICABLE, "kube_context": NOT_APPLICABLE, "prometheus": NOT_APPLICABLE}
     assert blocking_failures(results.values()) == []
 
@@ -184,7 +187,7 @@ def test_an_unreachable_docker_daemon_fails_and_blocks(tmp_path, vllm_server):
 def test_an_unavailable_gpu_fails_every_gpu_check_and_blocks(tmp_path, vllm_server):
     r = doctor(docker_profile(tmp_path, vllm_server.url),
                System(fail={"nvidia-smi": FileNotFoundError("nvidia-smi")}))
-    for name in ("nvidia_driver", "gpu", "gpu_expectations", "gpu_headroom"):
+    for name in ("nvidia_driver", "gpu", "gpu_expectations", "gpu_headroom", "watchdog_sensors"):
         assert r[name]["status"] == FAIL and r[name]["blocking"] is True, name
 
 
@@ -440,3 +443,81 @@ def test_doctor_of_a_broken_config_is_reported_by_the_cli_not_silently_ignored(t
     assert out.returncode == 2
     results = json.loads(out.stdout)
     assert results[0]["check"] == "config" and results[0]["status"] == FAIL
+
+
+# --- the watchdog's prerequisites ----------------------------------------------------------
+
+def wd_record(tmp_path, **fields):
+    from datetime import datetime, timezone
+
+    from aiops.watchdog import boot_id, proc_start
+
+    path = tmp_path / "run" / "aiops.state.json.watchdog"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc).isoformat()
+    record = {"status": "ARMED", "pid": os.getpid(), "proc_start": proc_start(os.getpid()),
+              "protected": {"pid": os.getpid(), "start": proc_start(os.getpid()),
+                            "boot_id": boot_id()}, "last_check_at": now, "interval": 1.0}
+    record.update(fields)
+    path.write_text(json.dumps(record))
+    return path
+
+
+def test_the_watchdog_can_establish_an_identity_and_a_stable_handle_here(tmp_path, vllm_server):
+    r = doctor(docker_profile(tmp_path, vllm_server.url))["watchdog_identity"]
+    assert r["status"] == PASS and "pidfd" in r["detail"] and r["blocking"] is True
+
+
+def test_a_host_without_pidfd_fails_and_blocks_because_the_watchdog_could_not_arm(
+        tmp_path, vllm_server, monkeypatch):
+    monkeypatch.setattr("aiops.doctor.pidfd_supported", lambda: (False, "pidfd unavailable (x)"))
+    r = doctor(docker_profile(tmp_path, vllm_server.url))["watchdog_identity"]
+    assert r["status"] == FAIL and r["blocking"] is True
+
+
+def test_the_watchdogs_own_gpu_sensor_path_is_checked_independently_of_the_engines(
+        tmp_path, vllm_server):
+    system = System()
+    r = doctor(docker_profile(tmp_path, vllm_server.url), system)["watchdog_sensors"]
+    assert r["status"] == PASS and r["blocking"] is True
+    # the watchdog's query is the 4-field memory/temperature/utilization one, not the engine's
+    assert any(any(a.startswith("--query-gpu=memory.used") for a in c) for c in system.calls)
+
+
+def test_the_kubernetes_profile_checks_only_the_ram_sensor_for_the_watchdog(tmp_path, prom):
+    url, data, _ = prom
+    seed_prometheus(data)
+    r = doctor(k8s_profile(tmp_path, url))
+    assert r["watchdog_sensors"]["status"] == PASS and "RAM" in r["watchdog_sensors"]["detail"]
+    assert r["watchdog_identity"]["status"] == PASS
+
+
+def test_no_watchdog_record_is_fine(tmp_path, vllm_server):
+    r = doctor(docker_profile(tmp_path, vllm_server.url))["watchdog_state"]
+    assert r["status"] == PASS and "no watchdog record" in r["detail"]
+
+
+def test_a_live_armed_watchdog_is_reported_not_flagged(tmp_path, vllm_server):
+    wd_record(tmp_path)
+    r = doctor(docker_profile(tmp_path, vllm_server.url))["watchdog_state"]
+    assert r["status"] == PASS and "armed" in r["detail"]
+
+
+def test_a_stale_watchdog_record_warns_without_blocking(tmp_path, vllm_server):
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    wd_record(tmp_path, pid=dead.pid, proc_start="1")
+    r = doctor(docker_profile(tmp_path, vllm_server.url))["watchdog_state"]
+    assert r["status"] == WARN and "stale" in r["detail"] and r["blocking"] is False
+
+
+def test_a_previous_abort_by_the_watchdog_is_surfaced(tmp_path, vllm_server):
+    wd_record(tmp_path, status="ABORTED", reason=["temperature_c"], action="SIGTERM")
+    r = doctor(docker_profile(tmp_path, vllm_server.url))["watchdog_state"]
+    assert r["status"] == WARN and "temperature_c" in r["detail"] and r["blocking"] is False
+
+
+def test_an_unreadable_watchdog_record_warns(tmp_path, vllm_server):
+    path = wd_record(tmp_path)
+    path.write_text("{ nope")
+    assert doctor(docker_profile(tmp_path, vllm_server.url))["watchdog_state"]["status"] == WARN

@@ -3,6 +3,7 @@
 Never mutates infrastructure: every command goes through ReadOnlyRun, which refuses anything
 that is not an allowlisted read. Never fixes anything.
 """
+import json
 import os
 import re
 import shutil
@@ -18,7 +19,8 @@ from aiops.prometheus import PrometheusAdapter, TelemetryError
 from aiops.runtime import QUERIES
 from aiops.store import AuditTampered, Store, StoreUnavailable
 from aiops.vllm import VllmClient
-from aiops.watchdog import _ram_percent
+from aiops.watchdog import (IdentityError, _ram_percent, identity_of, pidfd_supported, proc_start,
+                            read_sensors)
 
 PASS, WARN, FAIL, NOT_APPLICABLE = "PASS", "WARN", "FAIL", "NOT_APPLICABLE"
 
@@ -148,6 +150,49 @@ class _Doctor:
         if loose:
             return WARN, "looser than recommended: " + ", ".join(loose)
         return PASS, "safety limits are within the recommended range"
+
+    # -- the independent watchdog's prerequisites ----------------------------------------------
+    def watchdog_identity(self):
+        ok, detail = pidfd_supported()
+        if not ok:
+            return FAIL, f"the watchdog could not arm: {detail}"
+        try:
+            identity_of(os.getpid())
+        except IdentityError as e:
+            return FAIL, f"the watchdog could not establish a process identity: {e}"
+        return PASS, f"process identity (pid, start time, boot id) and a stable handle: {detail}"
+
+    def watchdog_sensors(self):
+        """The watchdog reads its OWN sensors, not the engine's: prove that path works."""
+        if self.p["provider"] != "docker":
+            try:
+                return PASS, f"host RAM readable ({_ram_percent():.0f}%) for the watchdog"
+            except OSError as e:
+                return FAIL, f"the watchdog could not read host RAM: {e}"
+        try:
+            s = read_sensors(run=self.run, gpu_index=self.p["gpu"]["index"])
+        except Exception as e:
+            return FAIL, f"the watchdog's sensors are unreadable ({e}); it would refuse to arm"
+        return PASS, (f"GPU memory {s['gpu_memory_percent']:.0f}%, temperature "
+                      f"{s['temperature_c']:.0f} C and RAM {s['ram_percent']:.0f}% readable "
+                      "through the watchdog's own nvidia-smi path")
+
+    def watchdog_state(self):
+        path = Path(self.p["control_plane"]["state_file"] + ".watchdog")
+        if not path.exists():
+            return PASS, "no watchdog record (none is running)"
+        try:
+            record = json.loads(path.read_text())
+            status = record["status"]
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            return WARN, f"watchdog record {path} is unreadable: {e}"
+        if status in ("ABORTING", "ABORTED"):
+            return WARN, (f"the previous run was ended by the watchdog "
+                          f"({', '.join(record.get('reason') or [])}); start will clear the record")
+        pid = record.get("pid")
+        if status == "ARMED" and type(pid) is int and proc_start(pid) == record.get("proc_start"):
+            return PASS, f"a watchdog is armed (pid {pid}) protecting pid {record['protected']['pid']}"
+        return WARN, f"stale watchdog record (status {status}, its process is gone); start will clear it"
 
     # -- docker-real-gpu --------------------------------------------------------------------
     def docker_cli(self):
@@ -314,7 +359,10 @@ class _Doctor:
 # `start`: an unhealthy workload is what the control plane exists to detect and remediate,
 # and refusing to start would strand a pending approval after a crash.
 COMMON = [("python", "python", True), ("database", "database", True),
-          ("state_dir", "state_dir", True), ("safety_limits", "safety_limits", False)]
+          ("state_dir", "state_dir", True), ("safety_limits", "safety_limits", False),
+          ("watchdog_identity", "watchdog_identity", True),
+          ("watchdog_sensors", "watchdog_sensors", True),
+          ("watchdog_state", "watchdog_state", False)]
 DOCKER = [("docker_cli", "docker_cli", True), ("docker_daemon", "docker_daemon", True),
           ("workload", "workload", True), ("nvidia_driver", "nvidia_driver", True),
           ("gpu", "gpu", True), ("gpu_expectations", "gpu_expectations", True),

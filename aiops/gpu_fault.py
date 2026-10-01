@@ -10,7 +10,8 @@ import sys
 import time
 from pathlib import Path
 
-from aiops.watchdog import read_sensors, supervise
+from aiops.supervise import supervise
+from aiops.watchdog import read_sensors
 
 MAX_BUDGET_MIB = 4096
 MAX_HOLD_SECONDS = 60

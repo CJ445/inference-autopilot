@@ -9,6 +9,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -26,8 +27,13 @@ from aiops.runtime import build_engine
 from aiops.serve import Service
 from aiops.store import AuditTampered, Store, StoreUnavailable
 from aiops.vllm import VllmClient
+from aiops import watchdog as watchdog_module
+from aiops.watchdog import boot_id, proc_start
 
-EXIT_RUNNING, EXIT_STOPPED = 0, 3
+EXIT_RUNNING, EXIT_STOPPED, EXIT_UNPROTECTED = 0, 3, 4
+ARM_TIMEOUT_SECONDS = 15
+PREVIOUS_WATCHDOG_WAIT_SECONDS = 5
+WATCHDOG_FILE = Path(watchdog_module.__file__)
 
 
 class StateCorrupt(ValueError):
@@ -35,15 +41,6 @@ class StateCorrupt(ValueError):
 
 
 # -- state file ------------------------------------------------------------------------------
-
-def proc_start(pid):
-    """The process start time (/proc stat field 22): identifies a process across PID reuse."""
-    try:
-        text = Path(f"/proc/{pid}/stat").read_text()
-    except OSError:
-        return None
-    return text.rsplit(")", 1)[1].split()[19]
-
 
 def read_state(path):
     try:
@@ -84,10 +81,120 @@ def _release(path):
         path.unlink(missing_ok=True)
 
 
+# -- watchdog: an independent process whose lifetime is tied to this invocation -----------------
+
+def watchdog_state_path(profile):
+    return Path(profile["control_plane"]["state_file"] + ".watchdog")
+
+
+def _read_watchdog(path):
+    try:
+        text = Path(path).read_text()
+    except FileNotFoundError:
+        return None
+    try:
+        record = json.loads(text)
+        if not isinstance(record, dict) or not isinstance(record.get("status"), str):
+            raise ValueError("not a watchdog record")
+    except ValueError as e:
+        raise StateCorrupt(f"watchdog state file {path} is unreadable: {e}") from e
+    return record
+
+
+def _watchdog_alive(record):
+    pid = record.get("pid")
+    return type(pid) is int and proc_start(pid) is not None and proc_start(pid) == record.get(
+        "proc_start")
+
+
+class WatchdogProcess:
+    """The watchdog child of this `aiops start`. Dies with the invocation; never resurrected."""
+
+    def __init__(self, popen, state_path):
+        self._p, self.state_path, self.pid = popen, Path(state_path), popen.pid
+
+    def wait_armed(self, timeout):
+        """True only when THIS watchdog published ARMED: a stale record cannot pass for it."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._p.poll() is not None:
+                return False
+            try:
+                record = _read_watchdog(self.state_path)
+            except StateCorrupt:
+                record = None
+            if record and record["status"] == "ARMED" and record.get("pid") == self.pid:
+                return True
+            time.sleep(0.05)
+        return False
+
+    def poll(self):
+        return self._p.poll()
+
+    def disarm(self, timeout=5):
+        try:
+            record = _read_watchdog(self.state_path)
+        except StateCorrupt:
+            record = None
+        if record and record["status"] == "ABORTING" and record.get("pid") == self.pid:
+            return          # mid-abort: it waits for THIS process to exit and must record ABORTED;
+                            # signalling or waiting on it would deadlock the shutdown
+        if self._p.poll() is None:
+            self._p.send_signal(signal.SIGTERM)      # the watchdog's disarm: it exits quietly
+            try:
+                self._p.wait(timeout)
+            except subprocess.TimeoutExpired:
+                self._p.kill()                       # our own child, never the control plane
+                self._p.wait()
+        try:
+            record = _read_watchdog(self.state_path)
+        except StateCorrupt:
+            return
+        if record and record["status"] == "ARMED" and record.get("pid") == self.pid:
+            self.state_path.unlink(missing_ok=True)   # an ABORTED record stays as evidence
+
+
+def spawn_watchdog(profile, protected_pid=None):
+    """Start the watchdog as `python -I aiops/watchdog.py` (no aiops package, no engine code).
+
+    It reads the budgets from the profile file itself. The identity handed to it is
+    (pid, start time, boot id); the watchdog verifies it and refuses to arm if it cannot.
+    """
+    pid = os.getpid() if protected_pid is None else protected_pid
+    popen = subprocess.Popen(
+        [sys.executable, "-I", str(WATCHDOG_FILE), "--config", profile["config_path"],
+         "--pid", str(pid), "--proc-start", proc_start(pid) or "0",
+         "--boot-id", boot_id() or "unknown"],
+        start_new_session=True, stdin=subprocess.DEVNULL)   # terminal signals never reach it
+    return WatchdogProcess(popen, watchdog_state_path(profile))
+
+
+def _clear_previous_watchdog(profile, out):
+    """Reject a previous run's record before arming. False if a live watchdog still holds it."""
+    path = watchdog_state_path(profile)
+    try:
+        record = _read_watchdog(path)
+    except StateCorrupt as e:
+        out(f"refusing to start: {e}; inspect it and remove it if no watchdog is running")
+        return False
+    if record is None:
+        return True
+    if record["status"] == "ARMED" and _watchdog_alive(record):
+        deadline = time.monotonic() + PREVIOUS_WATCHDOG_WAIT_SECONDS   # it exits once its
+        while _watchdog_alive(record) and time.monotonic() < deadline:  # process is gone
+            time.sleep(0.1)
+        if _watchdog_alive(record):
+            out(f"refusing to start: a previous watchdog (pid {record['pid']}) is still running")
+            return False
+    out(f"clearing the previous run's watchdog record ({record['status']})")
+    path.unlink(missing_ok=True)
+    return True
+
+
 # -- start -----------------------------------------------------------------------------------
 
 def start(config_path, stop_event, out=print, doctor=run_doctor, build=build_engine,
-          service_cls=Service):
+          service_cls=Service, spawn_watchdog=spawn_watchdog):
     try:
         profile = load_profile(config_path)
     except ProfileError as e:
@@ -118,6 +225,9 @@ def start(config_path, stop_event, out=print, doctor=run_doctor, build=build_eng
     if notes:
         out(format_results(notes))
 
+    if not _clear_previous_watchdog(profile, out):
+        return 1
+
     try:
         engine = build(profile)
     except StoreUnavailable as e:
@@ -142,15 +252,57 @@ def start(config_path, stop_event, out=print, doctor=run_doctor, build=build_eng
         out("already running (another control plane claimed the state file first)")
         return 0
     try:
+        watchdog = spawn_watchdog(profile)
+    except Exception as e:
+        out(f"refusing to start: cannot start the watchdog: {type(e).__name__}: {e}")
+        service.server.server_close()
+        _release(state_path)
+        return 1
+    if not watchdog.wait_armed(ARM_TIMEOUT_SECONDS):
+        out("refusing to start: the watchdog did not arm, and the control plane must not run "
+            "unprotected (its message is above)")
+        watchdog.disarm()
+        service.server.server_close()
+        _release(state_path)
+        return 1
+
+    code = 0
+    try:
         service.start()
         out(f"started: profile {profile['name']}, workload {profile['workload']['name']!r}, "
-            f"pid {os.getpid()}, API http://127.0.0.1:{cp['port']}")
-        stop_event.wait()
+            f"pid {os.getpid()}, API http://127.0.0.1:{cp['port']}, watchdog pid {watchdog.pid}")
+        while not stop_event.wait(1.0):
+            if watchdog.poll() is not None:
+                out(f"the watchdog exited unexpectedly (code {watchdog.poll()}); stopping: the "
+                    "control plane must not run unprotected")
+                code = EXIT_UNPROTECTED
+                break
     finally:
         service.stop()
+        watchdog.disarm()
         _release(state_path)
+    try:
+        record = _read_watchdog(watchdog_state_path(profile))
+    except StateCorrupt:
+        record = None
+    if code == 0 and record and record["status"] in ("ABORTING", "ABORTED") and (
+            record.get("protected") or {}).get("pid") == os.getpid():
+        out("stopped by the watchdog: safety budget exceeded "
+            f"({', '.join(record.get('reason') or ['unknown'])}); see `aiops status`")
+        code = EXIT_UNPROTECTED
     out("stopped")
-    return 0
+    return code
+
+
+def _drop_stale_watchdog_record(profile):
+    """A record whose watchdog process is gone protects nothing; ABORTED records stay."""
+    path = watchdog_state_path(profile)
+    try:
+        record = _read_watchdog(path)
+    except StateCorrupt:
+        return
+    if record and record["status"] == "ARMED" and not _watchdog_alive(record):
+        path.unlink(missing_ok=True)
 
 
 # -- stop ------------------------------------------------------------------------------------
@@ -168,10 +320,12 @@ def stop(config_path, out=print, kill=os.kill, wait_seconds=15, poll_seconds=0.0
         out(f"cannot stop: {e}")
         return 1
     if state is None:
+        _drop_stale_watchdog_record(profile)
         out("already stopped")
         return 0
     if not is_running(state):
         state_path.unlink(missing_ok=True)
+        _drop_stale_watchdog_record(profile)
         out(f"already stopped (removed stale state for pid {state['pid']})")
         return 0
 
@@ -219,6 +373,31 @@ def _last_telemetry(cp, state):
     age = (datetime.now(timezone.utc) - datetime.fromisoformat(at)).total_seconds()
     return {"available": True, "observed_at": at, "age_seconds": round(age, 1),
             "health": body.get("health")}
+
+
+def _watchdog_status(profile):
+    try:
+        record = _read_watchdog(watchdog_state_path(profile))
+    except StateCorrupt as e:
+        return {"state": "unknown", "error": str(e)}
+    if record is None:
+        return {"state": "not running"}
+    status_ = record["status"]
+    if status_ in ("ABORTING", "ABORTED"):
+        return {"state": status_.lower(), "reason": record.get("reason"),
+                "action": record.get("action"), "at": record.get("at")}
+    if status_ != "ARMED":
+        return {"state": "unknown", "error": f"unrecognised watchdog status {status_!r}"}
+    if not _watchdog_alive(record):
+        return {"state": "stale", "pid": record.get("pid"),
+                "note": "the watchdog process is gone; nothing is protecting the control plane"}
+    age = (datetime.now(timezone.utc) - datetime.fromisoformat(record["last_check_at"])
+           ).total_seconds()
+    return {"state": "stalled" if age > max(5 * float(record.get("interval", 1.0)), 5.0)
+            else "armed", "pid": record["pid"], "protected_pid": record["protected"]["pid"],
+            "limits": record["limits"], "last_sample": record.get("last_sample"),
+            "last_check_age_seconds": round(age, 1),
+            "consecutive_sensor_failures": record.get("consecutive_sensor_failures", 0)}
 
 
 def _persisted(profile):
@@ -279,6 +458,7 @@ def status(config_path, run=subprocess.run, which=shutil.which):
 
     return {"control_plane": cp, "profile": profile["name"], "provider": profile["provider"],
             "workload": {"name": w["name"], "observed": observed}, "gpu": gpu, "vllm": vllm,
+            "watchdog": _watchdog_status(profile),
             "last_telemetry": _last_telemetry(cp, state), "active_incident": active,
             "pending_proposal": proposals, "audit_integrity": audit}
 
@@ -308,6 +488,7 @@ def format_status(s):
                  for i in s["active_incident"]) or "none"))
     lines.append("pending proposal:   " + (", ".join(f"{p['incident_id']} {p['action']} "
                  f"{p['workload']}" for p in s["pending_proposal"]) or "none"))
+    lines.append(f"watchdog:           {_watchdog_line(s['watchdog'])}")
     lines.append(f"audit integrity:    {s['audit_integrity']}")
     return "\n".join(lines)
 
@@ -315,3 +496,15 @@ def format_status(s):
 def _gpu_line(g):
     return (f"{g['uuid']}, {g['memory_used_mib']}/{g['memory_total_mib']} MiB, "
             f"{g['temperature_c']:.0f} C, util {g['utilization_percent']:.0f}%")
+
+
+def _watchdog_line(w):
+    if w["state"] in ("armed", "stalled"):
+        sample = w.get("last_sample") or {}
+        return (f"{w['state']} (pid {w['pid']} protecting {w['protected_pid']}; last check "
+                f"{w['last_check_age_seconds']}s ago; "
+                + ", ".join(f"{k} {v:.0f}" for k, v in sample.items() if isinstance(v, (int, float)))
+                + ")")
+    if w["state"] in ("aborted", "aborting"):
+        return f"{w['state']} - {', '.join(w.get('reason') or [])} ({w.get('action')}) at {w.get('at')}"
+    return w["state"] + (f" ({w['error']})" if "error" in w else (f" ({w['note']})" if "note" in w else ""))

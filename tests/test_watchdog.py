@@ -2,7 +2,8 @@ import os
 import sys
 import time
 
-from aiops.watchdog import check, supervise
+from aiops.supervise import supervise
+from aiops.watchdog import check
 
 LIMITS = {"max_gpu_memory_percent": 85, "max_gpu_percent": 90,
           "max_temperature_c": 80, "max_ram_percent": 90}

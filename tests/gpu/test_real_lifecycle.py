@@ -1,8 +1,9 @@
 """The real-GPU acceptance scenario through the PRODUCT lifecycle (bin/aiops). Opt in: AIOPS_GPU=1
 
-doctor -> status -> start (idempotent) -> pause the managed vLLM -> real probe fails ->
-INFERENCE_UNRESPONSIVE -> restart_workload proposal -> explicit approval -> real Docker restart
--> verified by real inference -> RESOLVED -> stop (safe twice).
+doctor -> status -> start (idempotent) -> WATCHDOG ARMED -> pause the managed vLLM -> real probe
+fails -> INFERENCE_UNRESPONSIVE -> restart_workload proposal -> explicit approval -> real Docker
+restart -> verified by real inference -> RESOLVED (the watchdog never interferes) -> stop ->
+WATCHDOG DISARMED (safe twice).
 """
 import json
 import os
@@ -16,7 +17,7 @@ import urllib.request
 from pathlib import Path
 
 import pytest
-from vllm_support import BASE, MODEL, NAME, THRESHOLD, docker
+from vllm_support import BASE, MODEL, NAME, THRESHOLD, docker, processes
 
 from aiops.docker import DockerProvider
 from aiops.gpu import read_gpu
@@ -91,6 +92,7 @@ stable_probes = 3
 probe_interval = 1
 ''')
     state_file, db = tmp_path / "aiops.state.json", tmp_path / "aiops.db"
+    wd_file = tmp_path / "aiops.state.json.watchdog"
     provider = DockerProvider("vllm")
     server = None
     try:
@@ -101,7 +103,8 @@ probe_interval = 1
         assert d.returncode == 0, d.stdout
         for name in ("python", "database", "state_dir", "docker_cli", "docker_daemon", "workload",
                      "nvidia_driver", "gpu", "gpu_expectations", "cuda_compat", "gpu_headroom",
-                     "vllm_endpoint", "vllm_metrics", "vllm_probe"):
+                     "vllm_endpoint", "vllm_metrics", "vllm_probe", "watchdog_identity",
+                     "watchdog_sensors", "watchdog_state"):
             assert results[name]["status"] == "PASS", (name, results[name])
         assert "12.8" in results["cuda_compat"]["detail"]     # computed from the real image
         assert sorted(p.name for p in tmp_path.iterdir()) == before and not db.exists()
@@ -130,6 +133,15 @@ probe_interval = 1
         time.sleep(3)
         assert http(port, "/api/v1/incidents")["incidents"] == []   # healthy: no incident
 
+        # -- the watchdog is armed on the control plane, as its own independent process -------
+        wd0 = json.loads(wd_file.read_text())
+        assert wd0["status"] == "ARMED" and wd0["protected"]["pid"] == server.pid
+        assert wd0["pid"] != server.pid and wd0["limits"]["max_gpu_memory_percent"] == 85
+        assert s1["watchdog"]["state"] == "armed" and s1["watchdog"]["protected_pid"] == server.pid
+        wd_pid = wd0["pid"]
+        found = processes("watchdog.py", str(cfg))
+        assert len(found) == 1 and found[0].split()[0] == str(wd_pid), found
+
         # -- the fault: pause the managed workload; the real probe fails --------------------
         docker("pause", NAME)
         incidents = wait_for(lambda: http(port, "/api/v1/incidents")["incidents"], 90, "incident")
@@ -151,6 +163,9 @@ probe_interval = 1
         assert len(s2["pending_proposal"]) == 1 and s2["audit_integrity"].startswith("valid")
         assert s2["workload"]["observed"]["ready"] is False        # observed, not assumed
 
+        # the fault (a hung workload) is not the watchdog's business: it stays armed and quiet
+        assert json.loads(wd_file.read_text())["status"] == "ARMED" and server.poll() is None
+
         # -- explicit human approval is the only way a restart happens ----------------------
         done = http(port, f"/api/v1/incidents/{inc['incident_id']}/remediation/approve",
                     method="POST", timeout=200)
@@ -170,10 +185,24 @@ probe_interval = 1
                           "vllm_metrics_readable": True, "inference_probe_stable": True}
         assert [i.status for i in incidents_db] == ["RESOLVED"]
 
+        # -- the watchdog did not interfere with remediation, and is still protecting ---------
+        wd1 = json.loads(wd_file.read_text())
+        assert wd1["status"] == "ARMED" and wd1["pid"] == wd_pid and server.poll() is None
+        assert wd1["last_check_at"] > wd0["last_check_at"]            # heartbeat kept running
+        assert wd1["consecutive_sensor_failures"] == 0
+        sample, limits = wd1["last_sample"], wd1["limits"]
+        assert sample["gpu_memory_percent"] < limits["max_gpu_memory_percent"]
+        assert sample["temperature_c"] < limits["max_temperature_c"]
+        assert json.loads(aiops("status", "--config", str(cfg), "--json").stdout)[
+            "watchdog"]["state"] == "armed"
+
         # -- stop: graceful, safe twice, leaves no process behind ---------------------------
         stopped = aiops("stop", "--config", str(cfg))
         assert stopped.returncode == 0 and server.wait(timeout=30) == 0
         assert not state_file.exists() and control_plane_processes(cfg) == []
+        assert not wd_file.exists()                                  # the watchdog was disarmed
+        wait_for(lambda: not Path(f"/proc/{wd_pid}").exists(), 15, "watchdog process to exit")
+        assert processes("watchdog.py", str(cfg)) == []
         with pytest.raises(urllib.error.URLError):
             http(port, "/health", timeout=2)
         assert "already stopped" in aiops("stop", "--config", str(cfg)).stdout

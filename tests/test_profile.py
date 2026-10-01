@@ -152,3 +152,42 @@ def test_there_is_no_way_to_name_a_second_workload_or_container(tmp_path):
     text = DOCKER.replace('name = "vllm"', 'name = "vllm"\ncontainers = ["a", "b"]')
     with pytest.raises(ProfileError):
         load_profile(write(tmp_path, text))
+
+
+# --- watchdog budgets and tuning (Slice 7) -------------------------------------------------
+
+def test_every_profile_has_a_bounded_runtime_budget_and_watchdog_defaults(tmp_path):
+    for text, name in ((DOCKER, "d.toml"), (KUBERNETES, "k.toml")):
+        p = load_profile(write(tmp_path, text, name=name))
+        assert p["safety"]["max_runtime_seconds"] == 86400          # finite by default
+        assert p["watchdog"] == {"interval": 1.0, "term_grace_seconds": 20,
+                                 "max_sensor_failures": 3}
+
+
+def test_the_kubernetes_profile_gets_a_host_ram_budget(tmp_path):
+    assert load_profile(write(tmp_path, KUBERNETES))["safety"]["max_ram_percent"] == 90
+
+
+def test_budgets_and_watchdog_tuning_can_be_configured(tmp_path):
+    text = DOCKER.replace("[safety]", "[safety]\nmax_runtime_seconds = 600") \
+                 + "\n[watchdog]\ninterval = 0.5\nterm_grace_seconds = 5\nmax_sensor_failures = 1\n"
+    p = load_profile(write(tmp_path, text))
+    assert p["safety"]["max_runtime_seconds"] == 600
+    assert p["watchdog"] == {"interval": 0.5, "term_grace_seconds": 5, "max_sensor_failures": 1}
+
+
+@pytest.mark.parametrize("edit", [
+    lambda t: t.replace("[safety]", "[safety]\nmax_runtime_seconds = 0"),
+    lambda t: t.replace("[safety]", "[safety]\nmax_runtime_seconds = -5"),
+    lambda t: t.replace("[safety]", '[safety]\nmax_runtime_seconds = "600"'),
+    lambda t: t + "\n[watchdog]\ninterval = 0\n",
+    lambda t: t + "\n[watchdog]\nterm_grace_seconds = 0\n",
+    lambda t: t + "\n[watchdog]\nmax_sensor_failures = 0\n",
+    lambda t: t + "\n[watchdog]\nmax_sensor_failures = 11\n",
+    lambda t: t + "\n[watchdog]\nmax_sensor_failures = 2.5\n",
+    lambda t: t + "\n[watchdog]\naction = \"restart\"\n",            # no action is configurable
+    lambda t: t + "\n[watchdog]\ncommand = \"reboot\"\n",
+])
+def test_invalid_watchdog_configuration_is_rejected(tmp_path, edit):
+    with pytest.raises(ProfileError):
+        load_profile(write(tmp_path, edit(DOCKER)))

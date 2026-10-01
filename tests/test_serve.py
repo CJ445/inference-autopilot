@@ -126,6 +126,8 @@ def test_real_process_degrades_without_prometheus_and_stops_cleanly_on_sigterm(t
         wait_for(degraded, timeout=15)  # a real Prometheus outage -> DEGRADED
         proc.send_signal(signal.SIGTERM)
         assert proc.wait(timeout=10) == 0
+        notice = proc.stderr.read().lower()               # never silently imply protection
+        assert "unmanaged" in notice and "no watchdog" in notice and "aiops start" in notice
     finally:
         if proc.poll() is None:
             proc.kill()

@@ -78,6 +78,11 @@ def _optional(check):
 CONTROL_PLANE = {"port": (_int(1, 65535), 8080), "db": (_string, "aiops.db"),
                  "state_file": (_string, "aiops.state.json"), "interval": (_num(0), 5.0)}
 
+# The independent watchdog's tuning. There is deliberately NO action or command key: the
+# watchdog's one action (terminate the protected process) is fixed in code.
+WATCHDOG = {"interval": (_num(0), 1.0), "term_grace_seconds": (_num(0), 20),
+            "max_sensor_failures": (_int(1, 10), 3)}
+
 SCHEMAS = {
     "docker-real-gpu": {
         "provider": "docker",
@@ -90,10 +95,12 @@ SCHEMAS = {
         "safety": {"gpu_memory_threshold_bytes": (_int(1, 10**13), REQUIRED),
                    "max_gpu_memory_percent": (_int(1, 100), 85),
                    "max_temperature_c": (_int(1, 120), 80),
-                   "max_ram_percent": (_int(1, 100), 90)},
+                   "max_ram_percent": (_int(1, 100), 90),
+                   "max_runtime_seconds": (_int(1, 10**7), 86400)},
         "verification": {"timeout": (_num(0), 60), "interval": (_num(0), 2.0),
                          "stable_probes": (_int(1, 20), 3),
                          "probe_interval": (_num(0, strict=False), 1.0)},
+        "watchdog": WATCHDOG,
     },
     "kubernetes": {
         "provider": "kubernetes",
@@ -103,8 +110,11 @@ SCHEMAS = {
                      "context": (_regex(CONTEXT, "kubectl context"), REQUIRED),
                      "prometheus_url": (_loopback_url, REQUIRED)},
         "safety": {"gpu_memory_threshold_bytes": (_int(1, 10**13), REQUIRED),
-                   "error_rate_limit": (_fraction, 0.05)},
+                   "error_rate_limit": (_fraction, 0.05),
+                   "max_ram_percent": (_int(1, 100), 90),
+                   "max_runtime_seconds": (_int(1, 10**7), 86400)},
         "verification": {"timeout": (_num(0), 60), "interval": (_num(0), 2.0)},
+        "watchdog": WATCHDOG,
     },
 }
 

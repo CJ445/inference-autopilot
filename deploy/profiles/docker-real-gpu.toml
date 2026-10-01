@@ -27,9 +27,17 @@ gpu_memory_threshold_bytes = 4500000000   # memory-pressure detector threshold
 max_gpu_memory_percent = 85
 max_temperature_c = 80
 max_ram_percent = 90
+max_runtime_seconds = 86400          # watchdog budget: the control plane is terminated after this
 
 [verification]
 timeout = 150                        # seconds to observe real recovery before UNRESOLVED
 interval = 2
 stable_probes = 3                    # consecutive real completions required
 probe_interval = 1
+
+# The independent watchdog (a separate process armed by `aiops start`). It enforces the
+# [safety] budgets, reading this file itself; nothing at runtime can change them.
+[watchdog]
+interval = 1                         # seconds between safety samples
+term_grace_seconds = 20              # SIGTERM first; SIGKILL only if it is still alive after this
+max_sensor_failures = 3              # consecutive unreadable samples before failing closed

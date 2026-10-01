@@ -1,11 +1,13 @@
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
 import urllib.error
+from datetime import datetime, timedelta, timezone
 import urllib.request
 from pathlib import Path
 
@@ -18,9 +20,11 @@ from test_vllm import Server
 
 from aiops.doctor import FAIL, PASS, run_doctor
 from aiops.engine import Engine
-from aiops.lifecycle import is_running, proc_start, read_state, start, status, stop
+from aiops.lifecycle import (is_running, proc_start, read_state, spawn_watchdog, start, status,
+                             stop)
 from aiops.runtime import build_engine
 from aiops.store import Store, StoreUnavailable
+from aiops.watchdog import boot_id
 
 
 def free_port():
@@ -45,6 +49,40 @@ def fake_build(world):
         db.parent.mkdir(parents=True, exist_ok=True)
         return Engine(world, world, CONFIG, store=Store(db))
     return build
+
+
+class FakeWatchdog:
+    def __init__(self, owner, profile):
+        self.owner, self.profile, self.disarmed, self.exit_code = owner, profile, 0, None
+        self.pid = 424242
+
+    def wait_armed(self, timeout):
+        if self.owner.on_arm:
+            self.owner.on_arm(self)
+        return self.owner.arms
+
+    def poll(self):
+        return self.exit_code
+
+    def disarm(self):
+        self.disarmed += 1
+
+
+class FakeWatchdogs:
+    """Stand-in spawner: tests of start/stop semantics must never arm a real watchdog on the
+    pytest process. The real spawner is exercised against a sacrificial child below."""
+
+    def __init__(self, arms=True, raises=None, on_arm=None):
+        self.arms, self.raises, self.on_arm, self.created = arms, raises, on_arm, []
+        self.stale_at_spawn = None
+
+    def __call__(self, profile):
+        if self.raises:
+            raise self.raises
+        self.stale_at_spawn = Path(profile["control_plane"]["state_file"] + ".watchdog").exists()
+        wd = FakeWatchdog(self, profile)
+        self.created.append(wd)
+        return wd
 
 
 def http(port, path):
@@ -72,6 +110,7 @@ class Running:
         self.stop_event, self.lines, self.rc = threading.Event(), [], []
         kw.setdefault("doctor", ok_doctor)
         kw.setdefault("build", fake_build(World()))
+        kw.setdefault("spawn_watchdog", FakeWatchdogs())
         self.thread = threading.Thread(target=lambda: self.rc.append(
             start(config, self.stop_event, out=self.lines.append, **kw)), daemon=True)
         self.thread.start()
@@ -408,3 +447,252 @@ def test_the_real_profile_degrades_instead_of_substituting_telemetry_when_the_gp
         assert http(port, "/api/v1/status")["last_observation"] is None   # nothing invented
     finally:
         r.finish()
+
+
+# --- the watchdog relationship (Slice 7) --------------------------------------------------------
+
+def wd_state_path(tmp_path):
+    return tmp_path / "run" / "aiops.state.json.watchdog"
+
+
+def write_wd_state(tmp_path, **fields):
+    wd_state_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc).isoformat()
+    record = {"status": "ARMED", "pid": os.getpid(), "proc_start": proc_start(os.getpid()),
+              "protected": {"pid": os.getpid(), "start": proc_start(os.getpid()),
+                            "boot_id": boot_id()},
+              "limits": {"max_ram_percent": 90, "max_runtime_seconds": 600}, "interval": 1.0,
+              "armed_at": now, "last_check_at": now, "consecutive_sensor_failures": 0,
+              "last_sample": {"gpu_memory_percent": 35.0, "temperature_c": 55.0,
+                              "ram_percent": 50.0, "runtime_seconds": 12.0}}
+    record.update(fields)
+    wd_state_path(tmp_path).write_text(json.dumps(record))
+    return record
+
+
+def test_start_arms_the_watchdog_before_the_control_plane_observes_anything(tmp_path, config):
+    built, seen = [], {}
+
+    def build(profile):
+        built.append(fake_build(World())(profile))
+        return built[0]
+
+    wds = FakeWatchdogs(on_arm=lambda wd: seen.update(at_arm=built[0].last_observation))
+    r = Running(config, build=build, spawn_watchdog=wds)
+    wait_for(lambda: read_state(state_path(tmp_path)))
+    wait_for(lambda: built[0].last_observation)               # ticking only after arming
+    assert len(wds.created) == 1 and seen["at_arm"] is None
+    assert wds.created[0].profile["workload"]["name"] == "vllm"
+    assert r.finish() == 0
+    assert wds.created[0].disarmed == 1                       # stop disarms it
+
+
+def test_a_watchdog_that_cannot_arm_stops_start_and_leaves_nothing_behind(tmp_path, config):
+    from aiops.profile import load_profile
+
+    port = load_profile(config)["control_plane"]["port"]
+    built, lines = [], []
+    wds = FakeWatchdogs(arms=False)
+
+    def build(profile):
+        built.append(fake_build(World())(profile))
+        return built[0]
+
+    rc = start(config, threading.Event(), out=lines.append, doctor=ok_doctor, build=build,
+               spawn_watchdog=wds)
+    assert rc == 1 and any("watchdog" in l and "refusing to start" in l for l in lines)
+    assert wds.created[0].disarmed == 1                       # no watchdog left behind
+    assert not state_path(tmp_path).exists()
+    assert built[0].last_observation is None                  # never ran unprotected
+    with pytest.raises(OSError):
+        socket.create_connection(("127.0.0.1", port), timeout=1)   # port released
+
+
+def test_a_watchdog_that_cannot_even_be_spawned_stops_start(tmp_path, config):
+    from aiops.watchdog import IdentityError
+
+    lines = []
+    rc = start(config, threading.Event(), out=lines.append, doctor=ok_doctor,
+               build=fake_build(World()),
+               spawn_watchdog=FakeWatchdogs(raises=IdentityError("cannot protect")))
+    assert rc == 1 and any("cannot protect" in l for l in lines)
+    assert not state_path(tmp_path).exists()
+
+
+def test_stop_through_the_lifecycle_disarms_the_watchdog(tmp_path, config):
+    wds = FakeWatchdogs()
+    r = Running(config, spawn_watchdog=wds)
+    wait_for(lambda: read_state(state_path(tmp_path)))
+    assert stop(config, out=lambda l: None, kill=lambda pid, sig: r.stop_event.set(),
+                wait_seconds=10) == 0
+    r.thread.join(timeout=10)
+    assert wds.created[0].disarmed == 1 and not state_path(tmp_path).exists()
+
+
+def test_a_stale_watchdog_state_file_is_rejected_before_arming(tmp_path, config):
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    write_wd_state(tmp_path, pid=dead.pid, proc_start="1")
+    wds = FakeWatchdogs()
+    r = Running(config, spawn_watchdog=wds)
+    wait_for(lambda: read_state(state_path(tmp_path)))
+    assert wds.stale_at_spawn is False                        # removed before the new one spawned
+    assert r.finish() == 0
+
+
+def test_a_stale_watchdog_state_file_cannot_pass_for_a_fresh_arming(tmp_path):
+    from aiops.profile import load_profile
+    from test_profile import KUBERNETES
+
+    cfg = write(tmp_path, KUBERNETES)
+    profile = load_profile(cfg)
+    (tmp_path / "aiops.state.json.watchdog").write_text(json.dumps(   # someone else's ARMED record
+        {"status": "ARMED", "pid": 1, "proc_start": "1"}))
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        handle = spawn_watchdog(profile, protected_pid=child.pid + 10_000_000)  # cannot arm
+        assert handle.wait_armed(timeout=10) is False          # the stale record is not trusted
+        handle.disarm()
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_the_real_watchdog_handle_arms_disarms_and_is_safe_to_disarm_twice(tmp_path):
+    from aiops.profile import load_profile
+    from test_profile import KUBERNETES
+
+    profile = load_profile(write(tmp_path, KUBERNETES))
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        handle = spawn_watchdog(profile, protected_pid=child.pid)
+        assert handle.wait_armed(timeout=15) is True and handle.poll() is None
+        record = json.loads((tmp_path / "aiops.state.json.watchdog").read_text())
+        assert record["status"] == "ARMED" and record["protected"]["pid"] == child.pid
+        handle.disarm()
+        handle.disarm()                                       # idempotent
+        assert handle.poll() == 0
+        assert child.poll() is None                           # disarming never touches the process
+        assert not (tmp_path / "aiops.state.json.watchdog").exists()
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_a_watchdog_that_dies_while_running_stops_the_control_plane_fail_closed(tmp_path, config):
+    wds = FakeWatchdogs()
+    r = Running(config, spawn_watchdog=wds)
+    wait_for(lambda: read_state(state_path(tmp_path)))
+    wds.created[0].exit_code = 5                              # the watchdog crashed
+    r.thread.join(timeout=10)
+    assert not r.thread.is_alive() and r.rc == [4]
+    assert any("unprotected" in l for l in r.lines)
+    assert not state_path(tmp_path).exists()
+
+
+def test_a_watchdog_initiated_stop_is_reported_and_its_record_is_kept(tmp_path, config):
+    r = Running(config)
+    wait_for(lambda: read_state(state_path(tmp_path)))
+    write_wd_state(tmp_path, status="ABORTING", reason=["ram_percent"])
+    r.stop_event.set()                                        # the watchdog's SIGTERM
+    r.thread.join(timeout=10)
+    assert r.rc == [4] and any("stopped by the watchdog" in l and "ram_percent" in l
+                               for l in r.lines)
+    assert wd_state_path(tmp_path).exists()                    # evidence stays for status/doctor
+
+
+def test_stop_of_a_stale_control_plane_also_removes_a_stale_watchdog_record(tmp_path, config):
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    state_path(tmp_path).parent.mkdir(parents=True)
+    state_path(tmp_path).write_text(json.dumps({"pid": dead.pid, "proc_start": "1"}))
+    write_wd_state(tmp_path, pid=dead.pid, proc_start="1")
+    assert stop(config, out=lambda l: None, kill=lambda *a: pytest.fail("no signal")) == 0
+    assert not state_path(tmp_path).exists() and not wd_state_path(tmp_path).exists()
+
+
+# --- status reports the watchdog ---------------------------------------------------------------
+
+def watchdog_of(tmp_path, vllm_server_url):
+    return status(make_config(tmp_path, url=vllm_server_url), run=System())["watchdog"]
+
+
+def test_status_reports_no_watchdog_when_none_is_running(tmp_path, vllm_server_url):
+    assert watchdog_of(tmp_path, vllm_server_url)["state"] == "not running"
+
+
+def test_status_reports_an_armed_watchdog_with_its_budgets_and_last_sample(
+        tmp_path, vllm_server_url):
+    write_wd_state(tmp_path)
+    w = watchdog_of(tmp_path, vllm_server_url)
+    assert w["state"] == "armed" and w["pid"] == os.getpid() and w["protected_pid"] == os.getpid()
+    assert w["limits"]["max_runtime_seconds"] == 600
+    assert w["last_sample"]["ram_percent"] == 50.0 and w["last_check_age_seconds"] < 5
+
+
+def test_status_reports_a_stalled_watchdog_when_its_heartbeat_stops(tmp_path, vllm_server_url):
+    old = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    write_wd_state(tmp_path, last_check_at=old)
+    assert watchdog_of(tmp_path, vllm_server_url)["state"] == "stalled"
+
+
+def test_status_reports_a_dead_watchdog_as_stale_not_armed(tmp_path, vllm_server_url):
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    write_wd_state(tmp_path, pid=dead.pid, proc_start="1")
+    assert watchdog_of(tmp_path, vllm_server_url)["state"] == "stale"
+
+
+def test_status_reports_what_the_watchdog_aborted_and_why(tmp_path, vllm_server_url):
+    write_wd_state(tmp_path, status="ABORTED", reason=["temperature_c"], action="SIGTERM",
+                   exited=True, at=datetime.now(timezone.utc).isoformat())
+    w = watchdog_of(tmp_path, vllm_server_url)
+    assert w["state"] == "aborted" and w["reason"] == ["temperature_c"] and w["action"] == "SIGTERM"
+
+
+def test_status_flags_an_unreadable_watchdog_record(tmp_path, vllm_server_url):
+    wd_state_path(tmp_path).parent.mkdir(parents=True)
+    wd_state_path(tmp_path).write_text("{ nope")
+    assert watchdog_of(tmp_path, vllm_server_url)["state"] == "unknown"
+
+
+def test_status_never_modifies_the_watchdog_record(tmp_path, vllm_server_url):
+    write_wd_state(tmp_path, status="ABORTED", reason=["ram_percent"])
+    before = wd_state_path(tmp_path).read_text()
+    watchdog_of(tmp_path, vllm_server_url)
+    assert wd_state_path(tmp_path).read_text() == before
+
+
+def test_disarming_never_interferes_with_a_watchdog_that_is_already_aborting(tmp_path):
+    """The deadlock the real GPU run exposed: the control plane's shutdown must not signal or
+    kill a watchdog that is mid-abort (it is waiting for us to exit, and must record ABORTED)."""
+    from aiops.profile import load_profile
+    from test_profile import KUBERNETES
+
+    cfg = write(tmp_path, KUBERNETES.replace("[safety]", "[safety]\nmax_runtime_seconds = 1")
+                + "\n[watchdog]\ninterval = 0.1\nterm_grace_seconds = 3\n")
+    profile = load_profile(cfg)
+    # a protected process that ignores SIGTERM: the abort takes the full 3 s grace, then SIGKILL
+    child = subprocess.Popen([sys.executable, "-c",
+                              "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                              "print('r', flush=True); time.sleep(60)"], stdout=subprocess.PIPE)
+    child.stdout.readline()
+    path = tmp_path / "aiops.state.json.watchdog"
+    handle = spawn_watchdog(profile, protected_pid=child.pid)
+    try:
+        assert handle.wait_armed(timeout=15)
+        wait_for(lambda: json.loads(path.read_text())["status"] == "ABORTING", 15)
+        started = time.monotonic()
+        handle.disarm()                                    # what the control plane does on exit
+        assert time.monotonic() - started < 1.5            # did not wait for a mid-abort watchdog
+        assert handle.poll() is None                       # and did not kill or signal it
+        assert child.wait(timeout=15) == -signal.SIGKILL   # the watchdog finished its job
+        deadline = time.monotonic() + 10
+        while handle.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert handle.poll() == 10                         # EXIT_ABORTED
+        final = json.loads(path.read_text())
+        assert final["status"] == "ABORTED" and final["action"] == "SIGKILL"
+    finally:
+        child.kill()
+        child.wait()

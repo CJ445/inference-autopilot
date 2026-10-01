@@ -16,7 +16,16 @@ prometheus_url = "http://127.0.0.1:19090"
 [safety]
 gpu_memory_threshold_bytes = 7500000000
 error_rate_limit = 0.05
+max_runtime_seconds = 86400          # watchdog budget: the control plane is terminated after this
+max_ram_percent = 90
 
 [verification]
 timeout = 60
 interval = 2
+
+# The independent watchdog (a separate process armed by `aiops start`). It enforces the
+# [safety] budgets, reading this file itself; nothing at runtime can change them.
+[watchdog]
+interval = 1                         # seconds between safety samples
+term_grace_seconds = 20              # SIGTERM first; SIGKILL only if it is still alive after this
+max_sensor_failures = 3              # consecutive unreadable samples before failing closed
