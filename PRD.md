@@ -2211,6 +2211,16 @@ Incident RESOLVED
 
 Every stage must be observable.
 
+> **Amendment (ADR-030).** The scenario above describes controlled GPU memory exhaustion causing a
+> CUDA allocation failure. On the real stack that could not be made to work (ADR-018: vLLM
+> preallocates its VRAM, so the bounded stressor produced zero vLLM failures). The OFFICIAL real
+> golden scenario is the **inference hang**: `docker pause` of the managed vLLM container, which
+> makes the real inference probe fail; the incident category is `INFERENCE_UNRESPONSIVE`, and the
+> remaining stages (evidence, RCA, proposal, approval-required policy, approved restart, lifecycle
+> identity change, verification by real inference, RESOLVED) are exactly those above. The original
+> memory-exhaustion story is kept as the aspirational description and is not the acceptance
+> scenario.
+
 ---
 
 # 72. Golden Scenario Acceptance Criteria
@@ -2240,6 +2250,14 @@ verification_passed == true
 
 incident_state == RESOLVED
 ```
+
+> **How these are asserted (ADR-030).** `tests/golden_acceptance.py` evaluates each criterion on
+> API-shaped data (incident detail, audit events, and two lifecycle identities observed
+> independently of the engine) and additionally requires the audit events in order, the recorded
+> verification checks to be exactly the ones reported (all `True`), and the correct mode marking
+> (REAL or SIMULATION). The simulated scenario (`tests/test_golden_parity.py`) and the real
+> Docker-pause scenario (`tests/gpu/test_real_golden.py`) are both judged by it, and its own tests
+> show it fails when each criterion is broken.
 
 ---
 
@@ -4375,7 +4393,7 @@ This section must be maintained during development.
 - [ ] CI
 
 ## Phase 10 — Demo
-- [ ] golden scenario reproducible
+- [x] golden scenario reproducible (the Docker-pause hang, ADR-030: 4 consecutive real runs on the RTX 4060; the simulated twin runs in CI without hardware)
 - [ ] documentation complete
 - [ ] final verification
 ```
@@ -4416,6 +4434,7 @@ This section must be maintained during development.
 | ADR-027 | 2026-10-01 | A single failed inference probe is not an incident. INFERENCE_UNRESPONSIVE now requires the probe to fail on 2 CONSECUTIVE ticks (`engine.UNRESPONSIVE_TICKS`; about one extra tick, ~5 s at the default interval, of detection latency). Found on real hardware: when a workload comes up, one failed probe around the moment Docker marks it healthy (`bad response: malformed http` with the model already loaded) opened a restart proposal for a workload that was fine (~1 run in 3). The count is per engine and resets on a successful probe, when the workload is absent/stopped/starting, on a telemetry outage (an invalid observation), and after a remediation restart (a new instance). GPU_MEMORY_PRESSURE is NOT debounced; the pure detector functions are unchanged; evidence, RCA, policy, approval, remediation and verification are unchanged | Invariants: (D1) one failed probe never creates an incident, proposal or audit event; (D2) a failure streak never spans a workload that went away, restarted or was unobservable | KNOWN GAPS: a graceful `docker stop` keeps the container Running for several seconds while vLLM shuts down, which can still exceed two ticks and open an incident; the count is in memory (a control-plane restart starts it afresh) |
 | ADR-028 | 2026-10-01 | SIMULATION mode (Phase 1). The production control loop runs over a synthetic world: `aiops/sim/` provides `SimWorld` (state; a restart changes the lifecycle generation `sim:<name>:generation-N`), `SimProvider` (same contract and identity binding as the real provider), `SimTelemetry` (the PRODUCTION `RealTelemetry`, so the observation shape is identical; evidence sources are `simulated-*`) and `SimSession` (the production `Engine` and the production `real_verifier`, mode SIMULATION, its own store). The golden scenario `model-unresponsive-recovery` is runnable headlessly as `aiops demo [--approve|--reject]` (no config, no infrastructure) and as a test harness. LABELS ARE STRUCTURAL: `AuditLog(mode)` stamps every event, `Incident.mode` and the engine stamp incidents, evidence `source_type` is `simulation` (it was a hard-coded `real`), `/api/v1/status` reports `mode`, and `Store(path, mode)` writes a marker that a real store refuses and a simulation store requires (real databases keep their exact schema: no marker table is created). ISOLATION: an AST test forbids `aiops/sim/` from importing subprocess/socket/urllib/http/shutil/ctypes/etc. or any real provider module, a fresh-interpreter test proves running a scenario loads none of them, and a test runs the scenario with subprocess, sockets, `os.system`, `shutil.which`, `urlopen` and `HTTPConnection` patched to raise | Invariants: (S1) simulation cannot reach Docker, NVIDIA, a process or the network; (S2) every simulation record is marked SIMULATION and cannot be mistaken for real; (S3) a real and a simulation store can never open each other's database; (S4) simulated recovery is judged by the production verifier from observed (simulated) state, so a restart that does not recover the model is UNRESOLVED; (S5) the scenario raises rather than narrating a loop that did not happen | KNOWN GAPS: the isolation is an in-process object graph, not a process boundary (`engine.py` imports `kubectl.py`, which imports `subprocess`, so the guarantee is also behavioural; DECISIONS.md D-1); only one fault is simulated; timestamps are wall-clock (states, event sequences and probe logs are deterministic); Practice in the TUI is Phase 2 |
 | ADR-029 | 2026-10-02 | Practice mode in the TUI (Phase 2). The control plane hosts at most one SIMULATION session (`aiops/practice.py`: `PracticeHost` with its own RLock, temp store and a 1 s ticker thread) and serves it under `/api/v1/practice/...` with the real API's shapes plus `/practice/start`, `/fault` (only into a healthy simulated model; 409 otherwise) and `/stop`; status carries `mode: SIMULATION` and `practice.stage` (derived from the engine, never scripted). The router rewrites a practice path only to status/audit/incident routes (health, system and control paths are unreachable through the prefix) and each namespace locks its own engine. TUI: `P` starts (or restarts) practice, `F` breaks the simulated model, `Esc` on the Overview leaves it; a persistent amber `PRACTICE · SIMULATION` banner is on every screen (and says when a screen shows the real system); the Overview guides from the server's stage; the approval dialog says a simulated restart touches nothing real; the header and Safety section show no real watchdog for a simulated session; every snapshot carries its namespace and a mismatch is discarded | Invariants: (P1) practice requests reach only the practice engine and real requests only the real one (same incident ids exist in both); (P2) nothing from one namespace is ever on screen in the other; (P3) a practice decision never restarts, pauses or creates anything real; (P4) a stop sent through the practice prefix does nothing; (P5) the practice is always visibly labelled | KNOWN GAPS: one practice session per control plane; the banner says containers, not Docker (DECISIONS.md D-9: the TUI source scan forbids the word); practice shares the control-plane process (DECISIONS.md D-1) |
+| ADR-030 | 2026-10-02 | The official real golden scenario is the Docker-pause inference hang (Phase 3), not GPU memory exhaustion. FINDING: the original §71 story could not be produced on this stack (ADR-018); a paused vLLM is bounded, reversible and reliably yields INFERENCE_UNRESPONSIVE, which ADR-019/ADR-027 already detect, diagnose and verify. THE JUDGE: `tests/golden_acceptance.py` encodes §72 (incident created, >=2 evidence, root cause present and backed by that evidence, remediation proposed, policy decision recorded before approval, remediation executed, infrastructure state changed, verification started and passed, RESOLVED) plus audit ordering and mode marking, and it is applied to BOTH the simulated and the real scenario so they share semantics; its own tests show each criterion can fail. ANTI-FAKE (§73): the lifecycle identity before and after is observed independently of the engine (`docker inspect`, or the simulated world), recovery is confirmed by direct inference requests, and the verification checks must equal the audit-recorded ones with every value exactly True. `tests/gpu/test_real_golden.py` ran 4 times in a row (94/88/81/81 s) | Invariants: (G1) RESOLVED requires an independently observed identity change; (G2) the real and simulated scenarios are held to the same function; (G3) the scenario needs no arbitrary command: the fault is one bounded, reversible `docker pause`, and the only action on the workload is the approved restart | KNOWN GAPS: the pause is applied by the operator (or the test harness); a guarded injector is Phase 4; the harness runs vLLM offline when the model is cached because a slow `huggingface.co` otherwise stalls vLLM startup for ~10 minutes; one hardware configuration (RTX 4060, vLLM v0.10.0, opt-125m) has been exercised |
 ```
 
 ---

@@ -13,6 +13,20 @@ from vllm_support import GUARD, IMAGE, MODEL, NAME, docker, state
 from aiops.watchdog import check, read_sensors
 
 
+def model_cached():
+    """True if the model is already in the shared Hugging Face cache volume.
+
+    vLLM otherwise asks huggingface.co for the file list first and, on a slow or unreachable
+    network, retries for ~10 minutes before falling back to the cache (seen on this machine).
+    """
+    try:
+        out = docker("run", "--rm", "-v", "aiops-hf-cache:/hf", "--entrypoint", "ls", IMAGE,
+                     "/hf/hub", check_rc=False)
+    except Exception:
+        return False
+    return f"models--{MODEL.replace('/', '--')}" in out
+
+
 @pytest.fixture(scope="session")
 def vllm():
     if os.environ.get("AIOPS_GPU") != "1" or not shutil.which("nvidia-smi"):
@@ -23,6 +37,7 @@ def vllm():
     assert baseline["gpu_memory_percent"] < 20, "GPU is busy"
     assert baseline["temperature_c"] < 70, "GPU is hot"
     docker("rm", "-f", NAME, check_rc=False)
+    offline = model_cached()          # a cached model must not depend on huggingface.co being reachable
     stop = threading.Event()
 
     def guard():
@@ -45,6 +60,7 @@ def vllm():
                "--label", "com.inference-autopilot.workload=vllm",
                "--memory", "8g", "--cpus", "4", "--shm-size", "1g",
                "-p", "127.0.0.1:8001:8000", "-v", "aiops-hf-cache:/hf", "-e", "HF_HOME=/hf",
+               *(["-e", "HF_HUB_OFFLINE=1"] if offline else []),
                "--health-cmd", health, "--health-interval", "5s", "--health-timeout", "5s",
                "--health-retries", "3", "--health-start-period", "240s",
                IMAGE, "--model", MODEL, "--gpu-memory-utilization", "0.35",

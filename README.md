@@ -178,6 +178,48 @@ A restart that does not bring the model back is `UNRESOLVED`, never `RESOLVED`. 
 the portable test harness: no GPU or Docker is needed to run it in CI. It cannot prove anything
 about your real hardware; the real golden scenario below does.
 
+## The real golden scenario (Docker pause)
+
+This is the project's official end-to-end demonstration on real hardware. It uses a real GPU, a real
+vLLM and your real approval; nothing is simulated. It needs the setup above (`aiops doctor` clean
+and the labelled vLLM container running and healthy).
+
+1. In one terminal run `aiops` and stay on the Overview (everything healthy).
+2. In another terminal pause the workload (a bounded, reversible fault):
+
+        docker pause aiops-vllm          # use your container's name
+
+3. Within about 10 seconds the real inference probe has failed twice in a row and an incident
+   appears: **INFERENCE_UNRESPONSIVE**, with evidence from the real GPU and the failed probe, a
+   deterministic root cause, a `restart_workload` proposal and "approval required". Nothing has been
+   restarted: the container is still paused.
+4. Open the incident (`Enter`), review it, approve (`A`, then `Enter`). The server restarts the
+   workload; the TUI shows the server's state as it verifies.
+5. About a minute later: `RESOLVED`. That means Docker reports a new lifecycle identity, the GPU and
+   metrics are readable, and three consecutive real completions succeeded. The audit chain records
+   the whole loop.
+
+If you abort, `docker unpause aiops-vllm` undoes the fault (approving the restart also clears it).
+The restart is the only thing that ever acts on your container, and only after your approval.
+
+**Why a hang and not GPU memory exhaustion:** vLLM preallocates its VRAM, so a bounded allocator-cap
+stressor never made it fail (zero failures in ~163 probes), and a larger one would breach the 85%
+watchdog limit (ADR-018). A paused workload is bounded, reversible and reliably produces exactly the
+condition the detector, RCA and verifier were built for (ADR-019, ADR-030).
+
+**How it is tested.** `tests/gpu/test_real_golden.py` runs this against the real machine
+(`AIOPS_GPU=1 python -m pytest tests/gpu/test_real_golden.py`; run it alone) and is judged by
+`tests/golden_acceptance.py`, which encodes the PRD §72 acceptance criteria. The *same* judge holds
+the simulated scenario to the same semantics (`tests/test_golden_parity.py`, no hardware), and its
+own tests prove it can fail: an unchanged lifecycle identity, an unresolved incident, checks that
+differ from the audit record, missing or misordered audit events, no root cause or too little
+evidence, a simulation that looks real (or the reverse), and a remediation that never executed.
+Recovery is observed independently of the control plane (`docker inspect` for the identity and the
+paused flag, and direct inference requests). The test was run 4 times in a row on the RTX 4060
+(94 s, 88 s, 81 s, 81 s). If the model is already in the `aiops-hf-cache` volume the harness starts
+vLLM offline (`HF_HUB_OFFLINE=1`): without that, a slow or unreachable `huggingface.co` made vLLM
+retry for about 10 minutes before falling back to the cache.
+
 ## Development
 
     cargo build --manifest-path tui/Cargo.toml     # debug build of the TUI

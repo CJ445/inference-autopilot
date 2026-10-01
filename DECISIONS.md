@@ -91,3 +91,16 @@ string would weaken a safety test.
 A real poll that is in flight when practice starts (or a practice poll when it ends) would paint the
 wrong world under, or without, the banner. Every snapshot carries the namespace it was fetched for
 and the app drops a mismatch; entering and leaving practice also clears the view.
+
+## D-11: One acceptance function for both golden scenarios; the PRD story is amended, not silently ignored
+
+*Brief:* the real Docker-pause scenario is the canonical real scenario and must use the same
+conceptual semantics as the simulation; GPU OOM is not forced.
+*Decision:* `tests/golden_acceptance.py` is the single judge (PRD §72 plus audit order, recorded
+checks and mode marking), used by the simulated and the real test. PRD §71 still literally describes
+GPU memory exhaustion, so ADR-030 and an amendment note under §71/§72 say plainly that the
+acceptance scenario is the inference hang and why (ADR-018), rather than leaving the spec and the
+tests in disagreement.
+*Harness change (not product code):* `tests/gpu/conftest.py` starts vLLM with `HF_HUB_OFFLINE=1`
+when the model is already in the cache volume. A slow `huggingface.co` made vLLM retry for ~10
+minutes and the real tests time out, unrelated to anything under test.
