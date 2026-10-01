@@ -118,7 +118,8 @@ def test_a_healthy_docker_real_gpu_setup_passes_every_applicable_check(tmp_path,
     statuses = {k: v["status"] for k, v in results.items()}
     assert statuses == {
         "python": PASS, "database": PASS, "state_dir": PASS, "safety_limits": PASS,
-        "docker_cli": PASS, "docker_daemon": PASS, "workload": PASS, "nvidia_driver": PASS,
+        "docker_cli": PASS, "docker_daemon": PASS, "fault_lease": PASS, "workload": PASS,
+        "nvidia_driver": PASS,
         "gpu": PASS, "gpu_expectations": PASS, "cuda_compat": PASS, "gpu_headroom": PASS,
         "vllm_endpoint": PASS, "vllm_metrics": PASS, "vllm_probe": PASS,
         "watchdog_identity": PASS, "watchdog_sensors": PASS, "watchdog_state": PASS,
@@ -526,3 +527,27 @@ def test_an_unreadable_watchdog_record_warns(tmp_path, vllm_server):
     path = wd_record(tmp_path)
     path.write_text("{ nope")
     assert doctor(docker_profile(tmp_path, vllm_server.url))["watchdog_state"]["status"] == WARN
+
+
+# --- fault lease ------------------------------------------------------------------------------------------
+
+def test_the_doctor_reports_an_outstanding_fault_lease(tmp_path, vllm_server):
+    import time
+
+    from aiops.faults.core import lease_path_for, write_lease
+    profile = docker_profile(tmp_path, vllm_server.url)
+    lease_path = lease_path_for(profile)
+    assert doctor(profile)["fault_lease"]["status"] == PASS               # none: fine
+    now = time.time()
+    base = {"fault_id": "f", "fault_type": "pause_workload", "workload": "vllm", "container_id": "c",
+            "expected_identity": "i", "created_at": "x", "paused_at": "x"}
+    write_lease(lease_path, {**base, "status": "ACTIVE", "expires_at": now + 60})
+    r = doctor(profile)["fault_lease"]
+    assert r["status"] == WARN and "paused until" in r["detail"] and r["blocking"] is False
+    write_lease(lease_path, {**base, "status": "ACTIVE", "expires_at": now - 60})
+    assert "has not been recovered" in doctor(profile)["fault_lease"]["detail"]
+    write_lease(lease_path, {**base, "status": "RECOVERED", "expires_at": now - 60})
+    r = doctor(profile)["fault_lease"]
+    assert r["status"] == PASS and "RECOVERED" in r["detail"]
+    lease_path.write_text("{ not json")
+    assert doctor(profile)["fault_lease"]["status"] == WARN               # unreadable: flagged, not ignored

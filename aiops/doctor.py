@@ -13,6 +13,7 @@ import urllib.request
 from pathlib import Path
 
 from aiops.docker import MANAGED_LABEL, WORKLOAD_LABEL, DockerProvider, WorkloadAbsent
+from aiops.faults.core import ACTIVE_STATES, FaultError, expired, lease_path_for, now_iso, read_lease
 from aiops.gpu import read_gpu
 from aiops.kubectl import ClusterError, KubernetesProvider
 from aiops.prometheus import PrometheusAdapter, TelemetryError
@@ -24,7 +25,7 @@ from aiops.watchdog import (IdentityError, _ram_percent, identity_of, pidfd_supp
 
 PASS, WARN, FAIL, NOT_APPLICABLE = "PASS", "WARN", "FAIL", "NOT_APPLICABLE"
 
-DOCKER_ONLY = ["docker_cli", "docker_daemon", "nvidia_driver", "gpu", "gpu_expectations",
+DOCKER_ONLY = ["docker_cli", "docker_daemon", "fault_lease", "nvidia_driver", "gpu", "gpu_expectations",
                "cuda_compat", "gpu_headroom", "vllm_endpoint", "vllm_metrics", "vllm_probe"]
 KUBERNETES_ONLY = ["kubectl", "kube_context", "prometheus"]
 RECOMMENDED_MAX = {"max_temperature_c": 85, "max_gpu_memory_percent": 90, "max_ram_percent": 95}
@@ -178,6 +179,23 @@ class _Doctor:
         return PASS, (f"GPU memory {s['gpu_memory_percent']:.0f}%, temperature "
                       f"{s['temperature_c']:.0f} C and RAM {s['ram_percent']:.0f}% readable "
                       "through the watchdog's own nvidia-smi path")
+
+    def fault_lease(self):
+        """A fault lease still open means the workload may be paused by a test; flag it."""
+        try:
+            lease = read_lease(lease_path_for(self.p))
+        except FaultError as e:
+            return WARN, str(e)
+        if lease is None:
+            return PASS, "no fault lease"
+        if lease["status"] not in ACTIVE_STATES:
+            return PASS, f"the last fault ended: {lease['status']}"
+        until = now_iso(lease["expires_at"])
+        if expired(lease):
+            return WARN, (f"a fault lease expired at {until} and has not been recovered yet: the "
+                          "workload may still be paused (the recovery process or the next "
+                          "`aiops start` resumes it)")
+        return WARN, f"a fault is active: the workload is paused until {until}"
 
     def watchdog_state(self):
         path = Path(self.p["control_plane"]["state_file"] + ".watchdog")
@@ -378,6 +396,7 @@ COMMON = [("python", "python", True), ("database", "database", True),
           ("watchdog_sensors", "watchdog_sensors", True),
           ("watchdog_state", "watchdog_state", False)]
 DOCKER = [("docker_cli", "docker_cli", True), ("docker_daemon", "docker_daemon", True),
+          ("fault_lease", "fault_lease", False),
           ("workload", "workload", True), ("nvidia_driver", "nvidia_driver", True),
           ("gpu", "gpu", True), ("gpu_expectations", "gpu_expectations", True),
           ("cuda_compat", "cuda_compat", True), ("gpu_headroom", "gpu_headroom", True),

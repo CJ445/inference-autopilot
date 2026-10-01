@@ -220,6 +220,46 @@ paused flag, and direct inference requests). The test was run 4 times in a row o
 vLLM offline (`HF_HUB_OFFLINE=1`): without that, a slow or unreachable `huggingface.co` made vLLM
 retry for about 10 minutes before falling back to the cache.
 
+## Breaking the real workload on purpose (guarded fault)
+
+For testing the real loop without typing `docker pause` yourself, the TUI can pause your real
+workload for a bounded time. It is a testing tool, never part of normal operation, and it can only
+do one thing.
+
+In the TUI: `Ctrl+P`, then **"Break the real workload (pause)…"**. There is deliberately no plain
+key for it. A dialog says exactly what will happen (`LIVE · GPU-REAL`: the workload stops answering
+until it is automatically resumed in 2 minutes, or the recovery flow restarts it) and nothing is
+sent until you press `Enter` (ignored for the first half second). While the fault is active a red
+banner on every screen shows the time left; `Ctrl+P`, then **"Resume the workload now"** ends it
+sooner. It is not offered while practicing, while a fault is already active, or on a control plane
+without the Docker provider.
+
+What makes it safe (ADR-031, DECISIONS.md D-12):
+
+* **It can run four commands and nothing else:** `ps` (with the two project labels), `inspect`,
+  `pause` and `unpause`, the last two only for a full 64-hex container id. Any other verb or shape
+  is refused before a process starts. It is a separate component from the remediation provider.
+* **It refuses unless the workload is exactly right:** exactly one container with both project
+  labels, running and not already paused, with its identity (`id:StartedAt`) checked twice, the
+  second time immediately before the pause.
+* **It cannot leave the workload paused forever.** The lease (fault id, workload, identity,
+  `expires_at`) is persisted *before* anything is paused, and an independent reaper process is armed
+  and verified alive first; if it cannot arm, nothing is paused. Four layers each end the fault:
+  the reaper process (survives a control-plane crash), the control plane's own monitor, the next
+  `aiops start`, and `aiops doctor` flags an outstanding lease (`fault_lease`). A graceful stop ends
+  it too.
+* **It never touches a different workload.** Recovery unpauses only if the identity still matches
+  *and* the container is paused. If the workload was restarted (for example by an approved
+  remediation) or replaced meanwhile, it records `IDENTITY_CHANGED` and does nothing.
+* **It is explicit and recorded.** `POST /api/v1/faults` needs the `X-Aiops-Confirm: inject-fault`
+  header (a web page cannot send it) and refuses unknown fault types, any target but the configured
+  workload, durations outside 15 to 300 seconds, a second fault, and failed preconditions.
+  `fault_injected` and `fault_ended` are written to the hash-chained audit exactly once each.
+
+One thing to know: if you do nothing, the workload resumes when the lease ends, the hang clears,
+and the incident it produced stays pending (the known ADR-019 gap); approving it would restart a
+healthy workload. The default 2 minutes is enough to review and approve.
+
 ## Development
 
     cargo build --manifest-path tui/Cargo.toml     # debug build of the TUI

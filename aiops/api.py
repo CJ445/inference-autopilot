@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 from aiops.engine import CLOSED, NothingToApprove, WorkloadBusy
+from aiops.faults.core import DEFAULT_DURATION, FaultError
 from aiops.practice import PracticeStateError
 from aiops.store import StoreUnavailable
 
@@ -20,6 +21,11 @@ CONTROL_STOP = "/api/v1/control/stop"
 # A browser cannot attach a custom header to a cross-origin request without a preflight this API
 # never answers, so requiring it keeps a web page from stopping the control plane.
 STOP_CONFIRM_HEADER, STOP_CONFIRM_VALUE = "X-Aiops-Confirm", "stop-control-plane"
+FAULTS, FAULTS_CANCEL = "/api/v1/faults", "/api/v1/faults/cancel"
+FAULT_CONFIRM_VALUE = "inject-fault"
+FAULT_STATUS = {"INVALID_REQUEST": 400, "CONFIRMATION_REQUIRED": 400, "FAULT_ACTIVE": 409,
+                "PRECONDITION_FAILED": 409, "REFUSED_OPERATION": 403}
+MAX_BODY_BYTES = 1024
 
 
 class _Views:
@@ -93,7 +99,7 @@ def _is_practice(path):
 
 
 def make_server(engine, host="127.0.0.1", port=8080, lock=None, info=None, status_extra=None,
-                system=None, practice=None):
+                system=None, practice=None, faults=None):
     """Local control API (PRD §55).
 
     One lock serialises WRITES to the engine. Reads (GET) do not take it: a tick or a remediation
@@ -106,6 +112,9 @@ def make_server(engine, host="127.0.0.1", port=8080, lock=None, info=None, statu
     `practice` (optional, `aiops.practice.PracticeHost`) serves a SIMULATION session under
     `/api/v1/practice/...` with the same shapes as the real API. A practice path can only ever
     reach the practice engine, and a real path only the real one: the two share no object.
+
+    `faults` (optional, `aiops.faults.injector.FaultInjector`) offers the guarded real fault
+    (`/api/v1/faults`): explicit confirmation required, never automatic, absent without it.
     """
     lock = lock or threading.Lock()
     real = _Views(engine, info, status_extra)
@@ -119,7 +128,7 @@ def make_server(engine, host="127.0.0.1", port=8080, lock=None, info=None, statu
 
         def _route(self, method):
             path = urlsplit(self.path).path
-            if method == "GET" or path == CONTROL_STOP:
+            if method == "GET" or path in (CONTROL_STOP, FAULTS, FAULTS_CANCEL):
                 self._guarded(method)          # reads, and a stop request, never wait for the
             else:                              # engine lock (a remediation may hold it for minutes)
                 # writes stay serialised, each on the lock of ITS OWN engine
@@ -194,6 +203,8 @@ def make_server(engine, host="127.0.0.1", port=8080, lock=None, info=None, statu
                 return self._send(200, body)
             if path in ("/api/v1/version", "/api/v1/config", "/api/v1/diagnostics", CONTROL_STOP):
                 return self._system(method, path)
+            if path in (FAULTS, FAULTS_CANCEL):
+                return self._faults(method, path)
             m = ROUTE.match(path)
             if not m:
                 return self._error(404, "NOT_FOUND", "unknown path")
@@ -220,6 +231,48 @@ def make_server(engine, host="127.0.0.1", port=8080, lock=None, info=None, statu
                 return self._error(409, "POLICY_DENIED",
                                    "Another remediation holds this workload.")
             self._send(200, v.detail(incident))
+
+        def _body(self):
+            """The small JSON object a request carries, or None (already answered) if it is not one."""
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = -1
+            if not 0 <= length <= MAX_BODY_BYTES:
+                self._error(400, "INVALID_REQUEST", f"the body must be at most {MAX_BODY_BYTES} bytes")
+                return None
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                body = None
+            if not isinstance(body, dict):
+                self._error(400, "INVALID_REQUEST", "the body must be a JSON object")
+                return None
+            return body
+
+        def _faults(self, method, path):
+            if faults is None:
+                return self._error(404, "NOT_AVAILABLE", "fault injection is not available here")
+            try:
+                if method == "GET" and path == FAULTS:
+                    return self._send(200, {**faults.summary(), "last": faults.last()})
+                if method != "POST":
+                    return self._error(404, "NOT_FOUND", "unknown path")
+                if path == FAULTS_CANCEL:                   # resuming is always safe: no confirmation
+                    faults.cancel(by="operator")
+                    return self._send(200, {**faults.summary(), "last": faults.last()})
+                # injecting a REAL fault: explicit confirmation, a valid body, then every check
+                if self.headers.get(STOP_CONFIRM_HEADER) != FAULT_CONFIRM_VALUE:
+                    return self._error(400, "CONFIRMATION_REQUIRED",
+                                       "injecting a fault needs an explicit confirmation")
+                body = self._body()
+                if body is None:
+                    return
+                active = faults.inject(body.get("type"), body.get("target"),
+                                       body.get("duration_seconds", DEFAULT_DURATION))
+                return self._send(202, {"injected": True, "active": active})
+            except FaultError as e:
+                return self._error(FAULT_STATUS.get(e.code, 503), e.code, str(e))
 
         def _system(self, method, path):
             if system is None:

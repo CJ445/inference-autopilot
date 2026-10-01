@@ -96,3 +96,12 @@ def workload_presence(provider, name):
     # Docker's own health check says the container is still inside its start period (the model is
     # loading): it is running but cannot be expected to answer yet.
     return "starting" if state.get("Health", {}).get("Status") == "starting" else "running"
+
+
+def inspect_workload(provider, name):
+    """The managed workload's `docker inspect` record, or raise (WorkloadAbsent, or ClusterError for
+    ambiguity or an identity mismatch). One definition of "this is the managed workload" for
+    everything that must act on it: exactly one container with BOTH project labels, the `ps` id
+    equal to the `inspect` id, and the labels re-checked. Like `workload_presence`, a module
+    function so `DockerProvider` gains no public method."""
+    return provider._inspect(provider._resolve(name), name)

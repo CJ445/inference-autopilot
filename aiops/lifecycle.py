@@ -26,6 +26,8 @@ from aiops.prometheus import TelemetryError
 from aiops.runtime import build_engine
 from aiops.serve import Service
 from aiops.store import AuditTampered, Store, StoreUnavailable
+from aiops.faults.core import lease_path_for
+from aiops.faults.injector import FaultInjector
 from aiops.practice import PracticeHost
 from aiops.system import System
 from aiops.vllm import VllmClient
@@ -242,12 +244,17 @@ def start(config_path, stop_event, out=print, doctor=run_doctor, build=build_eng
             "workload": profile["workload"]["name"], "pid": os.getpid()}
     if profile["workload"].get("model"):
         info["model"] = profile["workload"]["model"]
+    # Guarded real fault injection exists only for the Docker provider (and only on request).
+    injector = (FaultInjector(profile["workload"]["name"], lease_path_for(profile))
+                if profile["provider"] == "docker" else None)
     # The API's confirmed stop is this very event: the one `aiops stop` sets via SIGTERM.
     system = System(profile, request_stop=stop_event.set, doctor=doctor)
     try:
         service = service_cls(engine, port=cp["port"], interval=cp["interval"], info=info,
-                              status_extra=lambda: {"watchdog": _watchdog_status(profile)},
-                              system=system, practice=PracticeHost())
+                              status_extra=lambda: {
+                                  "watchdog": _watchdog_status(profile),
+                                  **({"faults": injector.summary()} if injector else {})},
+                              system=system, practice=PracticeHost(), faults=injector)
     except OSError as e:
         out(f"refusing to start: cannot bind 127.0.0.1:{cp['port']}: {e} (is the port in use?)")
         return 1
@@ -277,6 +284,10 @@ def start(config_path, stop_event, out=print, doctor=run_doctor, build=build_eng
 
     code = 0
     try:
+        if injector is not None:
+            injector.audit = service.record
+            injector.sweep()                 # an expired lease from a previous run ends now
+            injector.start_monitor()
         service.start()
         out(f"started: profile {profile['name']}, workload {profile['workload']['name']!r}, "
             f"pid {os.getpid()}, API http://127.0.0.1:{cp['port']}, watchdog pid {watchdog.pid}")

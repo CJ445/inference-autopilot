@@ -77,6 +77,14 @@ class Engine:
             undo()
             raise
 
+    def record(self, event, data):
+        """Append an externally observed event (for example a fault lease change) to the audit
+        chain, durably; nothing is left half-recorded if persistence fails. The caller holds the
+        engine's write lock."""
+        snapshot = self._snapshot()
+        self.audit.append(event, data)
+        self._persist_or_rollback(snapshot)
+
     def _workload_state(self):
         if self.presence is None:
             return None

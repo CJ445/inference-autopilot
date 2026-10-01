@@ -10,11 +10,13 @@ from aiops.runtime import QUERIES, build_engine  # noqa: F401  (QUERIES re-expor
 
 class Service:
     def __init__(self, engine, port, interval, info=None, status_extra=None, system=None,
-                 practice=None):
+                 practice=None, faults=None):
         self.engine, self.interval, self.practice = engine, interval, practice
+        self.faults = faults
         self._lock, self._stop = threading.Lock(), threading.Event()
         self.server = make_server(engine, port=port, lock=self._lock, info=info,  # loopback only
-                                  status_extra=status_extra, system=system, practice=practice)
+                                  status_extra=status_extra, system=system, practice=practice,
+                                  faults=faults)
         self.port = self.server.server_address[1]
         self._threads = []
 
@@ -29,12 +31,19 @@ class Service:
 
     def stop(self):
         self._stop.set()
+        if self.faults is not None:
+            self.faults.shutdown()          # a graceful stop ends any fault: resume the workload
         if self.practice is not None:
             self.practice.shutdown()
         self.server.shutdown()
         self.server.server_close()
         for t in self._threads:
             t.join()
+
+    def record(self, event, data):
+        """Append to the real audit chain under the engine's write lock (used by the fault monitor)."""
+        with self._lock:
+            self.engine.record(event, data)
 
     def _loop(self):
         while not self._stop.is_set():

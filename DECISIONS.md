@@ -104,3 +104,58 @@ tests in disagreement.
 *Harness change (not product code):* `tests/gpu/conftest.py` starts vLLM with `HF_HUB_OFFLINE=1`
 when the model is already in the cache volume. A slow `huggingface.co` made vLLM retry for ~10
 minutes and the real tests time out, unrelated to anything under test.
+
+## D-12: The guarded real fault injector (Phase 4): design before code
+
+*Brief:* a separate `FaultInjector` (not in `DockerProvider`); one real fault (pause); strict
+pre-checks; an explicit confirmation; a persisted lease; an independent recovery that works even if
+the injector crashes; never arbitrary commands; never automatic.
+
+**Separation.** `aiops/faults/` is its own package with its own container runner that allows
+exactly four argv shapes (`ps` with the two project labels, `inspect <64-hex>`, `pause <64-hex>`,
+`unpause <64-hex>`) and nothing else. Container resolution and the identity checks reuse the
+`DockerProvider` code through a module-level helper (`docker.inspect_workload`), so there is one
+definition of "this is the managed workload" (labels, exactly one match, `ps` id equals `inspect`
+id) and `DockerProvider`'s public surface is unchanged (a test pins it).
+
+**Identity.** `expected_identity = "<full container id>:<StartedAt>"`, the same lifecycle identity
+the verifier uses. It is resolved twice: once for the preconditions and again immediately before the
+pause (a mismatch aborts). A restart changes `StartedAt`, so recovery refuses to touch a workload
+that was restarted or replaced while the fault was active.
+
+**Crash-safe order.** (1) preconditions; (2) persist the lease (`ARMING`, with `expires_at`) BEFORE
+doing anything; (3) arm an independent reaper process and verify it is alive; (4) re-check the
+identity; (5) pause; (6) mark the lease `ACTIVE`. If step 3 fails nothing is paused. A crash at any
+point leaves either nothing paused or a lease plus a reaper that will undo it.
+
+**Four layers of recovery** (each independently sufficient):
+1. the **reaper**, a separate detached process (`python -m aiops.faults.reaper`) that waits for the
+   deadline and then recovers; it survives a control-plane crash;
+2. the **control-plane monitor** thread: recovers at the deadline and re-arms a dead reaper;
+3. the **startup sweep**: a control plane that starts with an outstanding or expired lease recovers it;
+4. `aiops doctor` reports an outstanding lease (`fault_lease`, WARN).
+Recovery is idempotent and runs under an `flock` on the lease file: it re-inspects, unpauses only
+if the identity still matches AND the container is paused, records what it did, and never touches a
+different container. A graceful control-plane stop recovers an active lease too.
+
+**Audit.** The hash-chained audit is owned by the control plane, so the injector's `fault_injected`
+and `fault_recovered` events are written by the monitor thread from the lease record, idempotently
+(`audited_*` flags in the lease). Nothing blocks an API request on the engine lock (a remediation can
+hold it for minutes), and a recovery done by the reaper while the control plane is down is audited at
+the next start.
+
+**Trigger.** `POST /api/v1/faults` (the PRD §69 shape) with `type: "pause_workload"`, `target`
+(must equal the configured workload) and `duration_seconds` (bounded 15..300), plus the explicit
+header `X-Aiops-Confirm: inject-fault` (a web page cannot send it). Unknown types, other targets,
+unsafe durations, a missing confirmation, a second concurrent fault, and a failed precondition are all
+refused. It exists only on a control plane with the Docker provider. It is never automatic.
+
+**TUI.** Only through the command palette ("Break the real workload (pause)…") into a confirmation
+dialog that says what will happen, labelled `LIVE · GPU-REAL`; Enter is ignored for 500 ms like every
+other confirmation. While a fault is active a banner is on every screen with the time remaining, and
+the palette offers "Resume the workload now". It is hidden while practicing and when the server does
+not offer faults.
+
+**Known limit.** After the lease expires the workload recovers and the incident the hang produced
+stays pending (the ADR-019 gap); approving it would restart a healthy workload, which the operator
+can see. The default duration is long enough (120 s) to review and approve.
