@@ -21,7 +21,7 @@ def propose(incident, proposal, audit, approved=False):
 
 
 def execute(incident, proposal, cluster, audit, limits, timeout=60, interval=2,
-            on_executing=None):
+            on_executing=None, verify=None):
     """Run an approved proposal from POLICY_CHECK and verify the real outcome.
 
     on_executing runs after the EXECUTING transition and before any mutation, so callers
@@ -43,7 +43,8 @@ def execute(incident, proposal, cluster, audit, limits, timeout=60, interval=2,
     audit.append("remediation_finished", {"api_result": result})
 
     incident.transition("VERIFYING")
-    checks = _verify_until(cluster, workload, before, limits, timeout, interval)
+    verify = verify or (lambda w, b: _verify(cluster, w, b, limits))
+    checks = _verify_until(verify, workload, before, timeout, interval)
     audit.append("verification_finished", {"checks": checks})
     incident.transition("RESOLVED" if all(checks.values()) else "UNRESOLVED")
 
@@ -54,11 +55,11 @@ def remediate(incident, proposal, cluster, approved, audit, limits, timeout=60, 
         execute(incident, proposal, cluster, audit, limits, timeout, interval)
 
 
-def _verify_until(cluster, workload, id_before, limits, timeout, interval):
+def _verify_until(verify, workload, id_before, timeout, interval):
     """Poll until recovery is observed or the timeout expires; return the last checks."""
     deadline = time.monotonic() + timeout
     while True:
-        checks = _verify(cluster, workload, id_before, limits)
+        checks = verify(workload, id_before)
         if all(checks.values()) or time.monotonic() >= deadline:
             return checks
         time.sleep(interval)

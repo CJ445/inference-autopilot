@@ -82,4 +82,5 @@ def test_gpu_failure_is_a_telemetry_outage_so_the_engine_degrades():
 
 def test_evidence_sources_name_the_real_origins():
     t = RealTelemetry(lambda: dict(GPU), VllmClient("http://127.0.0.1:1", "m"))
-    assert t.sources == {"gpu_memory_used_bytes": "nvidia-smi", "inference_probe": "vllm-probe"}
+    assert t.sources == {"gpu_memory_used_bytes": "nvidia-smi", "inference_probe": "vllm-probe",
+                         "vllm_metrics": "vllm-metrics"}

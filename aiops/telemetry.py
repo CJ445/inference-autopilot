@@ -8,7 +8,8 @@ class RealTelemetry:
     fails and its metrics are marked unavailable; nothing is invented.
     """
 
-    sources = {"gpu_memory_used_bytes": "nvidia-smi", "inference_probe": "vllm-probe"}
+    sources = {"gpu_memory_used_bytes": "nvidia-smi", "inference_probe": "vllm-probe",
+               "vllm_metrics": "vllm-metrics"}
 
     def __init__(self, gpu, vllm):
         self.gpu, self.vllm = gpu, vllm

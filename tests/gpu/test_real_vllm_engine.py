@@ -148,3 +148,47 @@ def test_pressure_with_healthy_inference_is_insufficient_then_a_hung_workload_is
 
     assert result["outcome"] == "COMPLETED" and result["report"]["oom_caught"] is True
     assert provider.get_workload("vllm")["id"] == id_before  # no remediation was executed
+
+
+def test_paused_vllm_is_diagnosed_approved_restarted_and_verified_by_real_inference(vllm):
+    provider = DockerProvider()
+    engine = Engine(telemetry(), provider, {
+        "service": "vllm", "workload": "vllm", "gpu_threshold": THRESHOLD,
+        "timeout": 150, "interval": 2, "stable_probes": 3, "probe_interval": 1.0})
+    assert engine.tick() is None and engine.health == "HEALTHY"   # healthy baseline
+    id_before = provider.get_workload("vllm")["id"]
+
+    try:
+        docker("pause", NAME)                                     # the bounded, reversible fault
+        inc = engine.tick()
+        assert inc.category == "INFERENCE_UNRESPONSIVE" and inc.status == "POLICY_CHECK"
+        assert [i.category for i in engine.incidents] == ["INFERENCE_UNRESPONSIVE"]
+        by_metric = {e["metric"]: e for e in inc.evidence}
+        assert by_metric["inference_probe"]["source"] == "vllm-probe"
+        assert by_metric["inference_probe"]["value"]["ok"] is False
+        assert by_metric["inference_probe"]["relation"] == "supports"
+        assert by_metric["gpu_memory_used_bytes"]["source"] == "nvidia-smi"
+        assert by_metric["gpu_memory_used_bytes"]["value"] < THRESHOLD   # normal: not pressure
+        assert by_metric["vllm_metrics"]["value"] == {"available": False}
+        assert engine.pending[inc.incident_id] == {
+            "action": "restart_workload", "parameters": {"workload": "vllm"}}
+        assert provider.get_workload("vllm")["id"] == id_before   # nothing restarted yet
+
+        engine.approve(inc.incident_id)                           # explicit human approval
+    finally:
+        docker("unpause", NAME, check_rc=False)                   # no-op once restarted
+
+    # judged from independently observed state, not from the engine's own claim
+    assert inc.status == "RESOLVED"
+    assert provider.get_workload("vllm")["id"] != id_before       # a genuinely new run
+    assert VllmClient(BASE, MODEL, timeout=5).probe()["ok"] is True
+    assert json.loads(docker("inspect", NAME))[0]["State"]["Paused"] is False
+    assert read_gpu()["gpu_memory_used_bytes"] > 1.5e9            # model reloaded on the GPU
+    checks = next(e["data"]["checks"] for e in reversed(engine.audit.events)
+                  if e["event"] == "verification_finished")
+    assert checks == {"workload_restarted": True, "gpu_observable": True,
+                      "vllm_metrics_readable": True, "inference_probe_stable": True}
+    assert engine.audit.verify()
+    print("\nE2E timeline:", [t["state"] for t in inc.timeline])
+    print("E2E audit:", [e["event"] for e in engine.audit.events])
+    print("E2E checks:", checks)

@@ -1,12 +1,13 @@
 from aiops.audit import AuditLog
-from aiops.detector import detect_gpu_memory_pressure
+from aiops.detector import detect_gpu_memory_pressure, detect_inference_unresponsive
 from aiops.incident import Incident
 from aiops.prometheus import TelemetryError
 from aiops.rca import diagnose
 from aiops.remediate import execute, propose
 from aiops.store import StoreUnavailable
+from aiops.verify import real_verifier
 
-CLOSED = {"RESOLVED", "UNRESOLVED", "EXECUTION_FAILED", "REJECTED"}
+CLOSED = {"RESOLVED", "UNRESOLVED", "EXECUTION_FAILED", "REJECTED", "CLEARED"}
 
 
 class NothingToApprove(Exception):
@@ -60,20 +61,51 @@ class Engine:
             return None
         self.health = "HEALTHY"
 
-        detection = detect_gpu_memory_pressure(
-            observed["gpu_memory_used_bytes"], self.config["gpu_threshold"])
-        if detection is None:
+        category = self._detect(observed)
+        self._clear_gone_conditions(category)
+        if category is None:
             return None
 
-        active = self._active(self.config["service"], "GPU_MEMORY_PRESSURE")
+        active = self._active(self.config["service"], category)
         if active:
             if active.status == "INSUFFICIENT_EVIDENCE":
                 self._rediagnose(active, observed)
             return active
         snapshot = self._snapshot()
-        incident = self._open_incident(observed)
+        incident = self._open_incident(observed, category)
         self._persist_or_rollback(snapshot)
         return incident
+
+    def _detect(self, observed):
+        """Memory pressure keeps precedence; an unresponsive probe is its own condition."""
+        if detect_gpu_memory_pressure(observed["gpu_memory_used_bytes"],
+                                      self.config["gpu_threshold"]):
+            return "GPU_MEMORY_PRESSURE"
+        if detect_inference_unresponsive(observed):
+            return "INFERENCE_UNRESPONSIVE"
+        return None
+
+    def _clear_gone_conditions(self, current):
+        """An incident stuck at INSUFFICIENT_EVIDENCE whose condition is gone closes as CLEARED.
+
+        CLEARED is not RESOLVED: nothing was remediated or verified.
+        """
+        stale = [i for i in self.incidents
+                 if i.status == "INSUFFICIENT_EVIDENCE" and i.category != current]
+        if not stale:
+            return
+        snapshot = self._snapshot()
+        marks = [(i, i.status, len(i.timeline)) for i in stale]
+        for incident in stale:
+            self.audit.append("incident_cleared", {"incident_id": incident.incident_id})
+            incident.transition("CLEARED")
+
+        def undo():
+            for incident, status, n_timeline in marks:
+                incident.status = status
+                del incident.timeline[n_timeline:]
+
+        self._persist_or_rollback(snapshot, undo)
 
     def approve(self, incident_id):
         if incident_id not in self.pending:
@@ -86,11 +118,18 @@ class Engine:
         # consume the proposal durably before mutating: no replay after a crash, and no
         # mutation at all if the state cannot be saved (PRD §86)
         self._persist_or_rollback(snapshot)
+        verify = None
+        if hasattr(self.telemetry, "vllm"):  # real vLLM path: judge recovery by real inference
+            verify = real_verifier(
+                self.cluster, self.telemetry, c["gpu_threshold"],
+                check_memory=incident.category == "GPU_MEMORY_PRESSURE",
+                stable_probes=c.get("stable_probes", 3),
+                probe_interval=c.get("probe_interval", 1.0))
         execute(incident, proposal, self.cluster, self.audit,
                 limits={"gpu_memory_used_bytes": c["gpu_threshold"],
-                        "error_rate": c["error_rate_limit"]},
+                        "error_rate": c.get("error_rate_limit", 0.05)},
                 timeout=c.get("timeout", 60), interval=c.get("interval", 2),
-                on_executing=self._persist)
+                on_executing=self._persist, verify=verify)
         self._persist()
 
     def reject(self, incident_id):
@@ -116,9 +155,9 @@ class Engine:
                      if i.service == service and i.category == category
                      and i.status not in CLOSED), None)
 
-    def _open_incident(self, observed):
+    def _open_incident(self, observed, category):
         incident = Incident(f"inc_{len(self.incidents) + 1:03d}", self.config["service"],
-                            "GPU_MEMORY_PRESSURE")
+                            category)
         self.incidents.append(incident)
         self.audit.append("incident_created", {"incident_id": incident.incident_id})
         incident.transition("TRIAGING")
@@ -127,7 +166,7 @@ class Engine:
 
     def _diagnose(self, incident, observed):
         incident.evidence = self._evidence(incident, observed)
-        rca = diagnose(incident.evidence)
+        rca = diagnose(incident.evidence, incident.category)
         self.audit.append("rca_generated", {"incident_id": incident.incident_id,
                                             "rca": rca})
         incident.transition("DIAGNOSED")
@@ -142,7 +181,8 @@ class Engine:
 
     def _rediagnose(self, incident, observed):
         """New evidence may now support a diagnosis; unchanged evidence changes nothing."""
-        if diagnose(self._evidence(incident, observed))["insufficient_evidence"]:
+        if diagnose(self._evidence(incident, observed), incident.category)[
+                "insufficient_evidence"]:
             return
         snapshot = self._snapshot()
         status, evidence, n_timeline = incident.status, incident.evidence, len(incident.timeline)
@@ -168,6 +208,19 @@ class Engine:
             if "gpu_uuid" in observed:
                 e["resource"] = observed["gpu_uuid"]
             return e
+
+        if incident.category == "INFERENCE_UNRESPONSIVE":
+            used = observed["gpu_memory_used_bytes"]
+            return [  # each is a real observation; relation is relative to this category
+                ev(1, "gpu_memory_used_bytes", used, used <= self.config["gpu_threshold"]),
+                ev(2, "inference_probe",
+                   {"ok": observed["inference_probe_ok"],
+                    "latency_ms": observed["inference_probe_latency_ms"],
+                    "error": observed["inference_probe_error"]},
+                   not observed["inference_probe_ok"]),
+                ev(3, "vllm_metrics", {"available": observed["vllm_metrics_available"]},
+                   not observed["vllm_metrics_available"]),
+            ]
 
         evidence = [ev(1, "gpu_memory_used_bytes", observed["gpu_memory_used_bytes"], True)]
         if "inference_probe_ok" in observed:  # real vLLM path: a live inference probe
