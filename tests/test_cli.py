@@ -79,3 +79,75 @@ def test_the_launcher_script_runs_the_same_commands():
 def test_the_existing_serve_command_is_still_available():
     r = aiops("serve", "--help")
     assert r.returncode == 0 and "--prometheus-url" in r.stdout
+
+
+# --- `aiops tui`: locate the Rust binary and hand the terminal over to it ----------------------
+
+import stat  # noqa: E402
+
+
+def fake_tui(tmp_path):
+    """An executable that echoes the arguments it was started with."""
+    script = tmp_path / "aiops-tui"
+    script.write_text('#!/bin/sh\necho "TUI-ARGS: $@"\n')
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return script
+
+
+def tui(tmp_path, *args, binary="auto", **env):
+    environ = dict(os.environ)
+    if binary == "auto":
+        binary = fake_tui(tmp_path)
+    environ["AIOPS_TUI_BIN"] = str(binary)
+    environ.update(env)
+    return subprocess.run([sys.executable, "-m", "aiops", "tui", *args], capture_output=True,
+                          text=True, timeout=30, cwd=ROOT, env=environ)
+
+
+def test_tui_points_the_binary_at_the_profiles_control_plane_port(tmp_path):
+    cfg = valid_config(tmp_path)
+    r = tui(tmp_path, "--config", str(cfg))
+    assert r.returncode == 0 and "TUI-ARGS: --url http://127.0.0.1:8123" in r.stdout
+
+
+def test_tui_passes_extra_arguments_through_to_the_binary(tmp_path):
+    cfg = valid_config(tmp_path)
+    r = tui(tmp_path, "--config", str(cfg), "--once", "--screen", "audit")
+    assert "TUI-ARGS: --url http://127.0.0.1:8123 --once --screen audit" in r.stdout
+
+
+def test_an_explicit_url_overrides_the_profile(tmp_path):
+    r = tui(tmp_path, "--url", "http://127.0.0.1:9999")
+    assert r.returncode == 0 and "--url http://127.0.0.1:9999" in r.stdout
+
+
+def test_tui_refuses_an_invalid_profile_before_launching_anything(tmp_path):
+    bad = tmp_path / "bad.toml"
+    bad.write_text('profile = "fake-gpu"\n')
+    r = tui(tmp_path, "--config", str(bad))
+    assert r.returncode == 2 and "configuration error" in r.stdout and "TUI-ARGS" not in r.stdout
+
+
+def test_a_missing_binary_says_exactly_how_to_build_it(tmp_path):
+    r = tui(tmp_path, "--url", "http://127.0.0.1:8080", binary=tmp_path / "nope")
+    assert r.returncode == 1
+    assert "cargo build --release --manifest-path tui/Cargo.toml" in r.stdout + r.stderr
+
+
+def test_a_binary_that_is_not_executable_is_reported(tmp_path):
+    plain = tmp_path / "aiops-tui"
+    plain.write_text("not executable")
+    r = tui(tmp_path, "--url", "http://127.0.0.1:8080", binary=plain)
+    assert r.returncode == 1 and "not executable" in (r.stdout + r.stderr).lower()
+
+
+def test_tui_never_creates_state_or_touches_the_database(tmp_path):
+    cfg = valid_config(tmp_path)
+    binary = fake_tui(tmp_path)                    # part of the setup, not of what is measured
+    before = sorted(p.name for p in tmp_path.iterdir())
+    tui(tmp_path, "--config", str(cfg), binary=binary)
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
+
+
+def test_the_usage_mentions_the_tui():
+    assert "tui" in aiops().stdout.lower()

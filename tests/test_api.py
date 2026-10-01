@@ -168,3 +168,181 @@ def test_status_endpoint_includes_static_info_supplied_by_the_service():
             "profile": "docker-real-gpu"}
     finally:
         server.shutdown()
+
+
+# --- what the operator TUI needs (Slice 8): read-only additions -------------------------------
+
+def test_status_reports_audit_integrity(api):
+    base, engine, _ = api
+    engine.tick()
+    assert call(base, "/api/v1/status")[1]["audit"] == {
+        "valid": True, "events": len(engine.audit.events)}
+
+
+def test_status_flags_a_broken_audit_chain_instead_of_hiding_it(api):
+    base, engine, _ = api
+    engine.tick()
+    engine.audit.events[0]["data"]["incident_id"] = "forged"
+    st = call(base, "/api/v1/status")[1]
+    assert st["audit"]["valid"] is False and st["health"] == "HEALTHY"
+
+
+def test_status_includes_extra_state_supplied_by_the_service():
+    w = World()
+    server = make_server(Engine(w, w, CONFIG), port=0,
+                         status_extra=lambda: {"watchdog": {"state": "armed", "pid": 7}})
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01},
+                     daemon=True).start()
+    try:
+        st = call(f"http://127.0.0.1:{server.server_port}", "/api/v1/status")[1]
+        assert st["watchdog"] == {"state": "armed", "pid": 7}
+    finally:
+        server.shutdown()
+
+
+def test_a_failing_status_provider_is_reported_not_fatal():
+    w = World()
+
+    def broken():
+        raise RuntimeError("secret internal detail")
+
+    server = make_server(Engine(w, w, CONFIG), port=0, status_extra=broken)
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01},
+                     daemon=True).start()
+    try:
+        status, st = call(f"http://127.0.0.1:{server.server_port}", "/api/v1/status")
+        assert status == 200 and st["health"] == "HEALTHY" and "extra_error" in st
+        assert "secret" not in json.dumps(st)
+    finally:
+        server.shutdown()
+
+
+def test_audit_endpoint_lists_events_in_order_with_validity(api):
+    base, engine, _ = api
+    engine.tick()
+    status, body = call(base, "/api/v1/audit")
+    assert status == 200 and body["valid"] is True
+    assert [e["seq"] for e in body["events"]] == list(range(len(engine.audit.events)))
+    assert [e["event"] for e in body["events"]][:2] == ["incident_created", "rca_generated"]
+    assert all(len(e["hash"]) == 12 and "data" in e for e in body["events"])
+
+
+def test_audit_endpoint_returns_only_the_latest_events_when_limited(api):
+    base, engine, _ = api
+    engine.tick()
+    n = len(engine.audit.events)
+    body = call(base, "/api/v1/audit?limit=2")[1]
+    assert [e["seq"] for e in body["events"]] == [n - 2, n - 1]
+    assert call(base, "/api/v1/audit?limit=banana")[0] == 400
+    assert call(base, "/api/v1/audit?limit=0")[0] == 400
+
+
+def test_incident_detail_includes_the_rca_the_engine_produced(api):
+    base, engine, _ = api
+    inc = engine.tick()
+    detail = call(base, f"/api/v1/incidents/{inc.incident_id}")[1]
+    assert detail["rca"]["root_cause"]["category"] == "GPU_MEMORY_PRESSURE"
+    assert detail["rca"]["evidence_ids"] and detail["rca"]["insufficient_evidence"] is False
+
+
+def test_before_execution_there_is_no_verification_or_remediation(api):
+    base, engine, _ = api
+    inc = engine.tick()
+    detail = call(base, f"/api/v1/incidents/{inc.incident_id}")[1]
+    assert detail["verification"] == {"checks": None}
+    assert detail["remediation"] == {"state": "NOT_STARTED"}
+
+
+def test_after_approval_the_detail_carries_the_servers_verification_checks(api):
+    base, engine, _ = api
+    inc = engine.tick()
+    call(base, f"/api/v1/incidents/{inc.incident_id}/remediation/approve", "POST")
+    detail = call(base, f"/api/v1/incidents/{inc.incident_id}")[1]
+    assert detail["status"] == "RESOLVED"
+    assert detail["remediation"]["state"] == "EXECUTED"
+    checks = detail["verification"]["checks"]
+    assert checks and all(v is True for v in checks.values())
+    assert checks == next(e["data"]["checks"] for e in reversed(engine.audit.events)
+                          if e["event"] == "verification_finished")
+
+
+def test_failed_verification_is_reported_as_the_server_recorded_it():
+    from test_remediate import Cluster
+
+    class NoFix(Cluster):
+        def restart_workload(self, name):
+            self.restarts += 1
+            return "ok"                                   # nothing changes: identity stays
+
+    w = World()
+    engine = Engine(w, NoFix(), {**CONFIG, "timeout": 0.1, "interval": 0.01})
+    engine.cluster.uid = "abc"
+    w.fault, w.failures = True, 5
+    inc = engine.tick()
+    server = make_server(engine, port=0)
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01},
+                     daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        call(base, f"/api/v1/incidents/{inc.incident_id}/remediation/approve", "POST")
+        detail = call(base, f"/api/v1/incidents/{inc.incident_id}")[1]
+        assert detail["status"] == "UNRESOLVED"
+        assert detail["verification"]["checks"]["workload_restarted"] is False
+    finally:
+        server.shutdown()
+
+
+def test_reads_never_wait_for_the_engine_lock_but_writes_still_do():
+    import time as _t
+
+    w = World()
+    lock = threading.Lock()
+    server = make_server(Engine(w, w, CONFIG), port=0, lock=lock)
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01},
+                     daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    def get(path):                                        # a deadlock must fail, not hang the suite
+        try:
+            with urllib.request.urlopen(base + path, timeout=2) as r:
+                return r.status
+        except OSError as e:
+            return f"blocked: {e}"
+
+    try:
+        with lock:                                        # a long tick or remediation is running
+            started = _t.monotonic()
+            assert get("/api/v1/status") == 200
+            assert get("/health") == 200
+            assert get("/api/v1/incidents") == 200
+            assert get("/api/v1/audit") == 200
+            assert _t.monotonic() - started < 1.0         # live state during remediation
+
+            done = threading.Event()
+            threading.Thread(target=lambda: (call(
+                base, "/api/v1/incidents/nope/remediation/approve", "POST"), done.set()),
+                daemon=True).start()
+            assert not done.wait(0.4)                     # writes stay serialised behind the lock
+        assert done.wait(5)
+    finally:
+        server.shutdown()
+
+
+def test_the_new_read_routes_accept_no_writes(api):
+    base, _, _ = api
+    for method in ("POST", "PUT", "DELETE"):
+        status, _ = call(base, "/api/v1/audit", method) if method == "POST" else (404, None)
+        assert status == 404
+
+
+def test_a_failing_write_is_never_retried(api):
+    base, engine, w = api
+    inc = engine.tick()
+    calls = []
+
+    def boom(name):
+        calls.append(name)
+        raise RuntimeError("dictionary changed size during iteration")
+
+    w.get_workload = boom
+    status, _ = call(base, f"/api/v1/incidents/{inc.incident_id}/remediation/approve", "POST")
+    assert status == 500 and len(calls) == 1               # executed once, not five times

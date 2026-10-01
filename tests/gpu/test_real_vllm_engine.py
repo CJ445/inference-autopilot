@@ -15,7 +15,7 @@ import pytest
 from aiops.docker import DockerProvider
 from aiops.engine import Engine
 from aiops.gpu import read_gpu
-from aiops.gpu_fault import run_gpu_pressure
+from aiops.gpu_fault import DEFAULT_LIMITS, run_gpu_pressure
 from aiops.telemetry import RealTelemetry
 from aiops.vllm import VllmClient
 
@@ -24,6 +24,13 @@ pytestmark = pytest.mark.skipif(
     reason="set AIOPS_GPU=1 on a machine with an NVIDIA GPU and the vLLM image")
 
 from vllm_support import BASE, MODEL, NAME, THRESHOLD, docker  # noqa: E402
+
+
+# These tests are about the engine, not about GPU utilization. The stressor only allocates memory;
+# nvidia-smi reports a transient ~97% utilization while it tears its CUDA context down at the end
+# of the hold, which killed a child that had already finished (ABORTED, gpu_percent). Test-local:
+# the production default is unchanged, and the memory, temperature, RAM and time limits stay.
+STRESSOR_LIMITS = {k: v for k, v in DEFAULT_LIMITS.items() if k != "max_gpu_percent"}
 
 
 def telemetry():
@@ -53,7 +60,8 @@ def test_pressure_with_healthy_inference_is_insufficient_then_a_hung_workload_is
 
     result = {}
     stressor = threading.Thread(
-        target=lambda: result.update(run_gpu_pressure(2048, 45, tmp_path / "r.json")))
+        target=lambda: result.update(run_gpu_pressure(2048, 45, tmp_path / "r.json",
+                                                  limits=STRESSOR_LIMITS)))
     stressor.start()
     try:
         deadline = time.monotonic() + 90
@@ -140,7 +148,8 @@ def test_real_pressure_on_top_of_a_held_hang_opens_no_second_incident_or_proposa
     id_before = provider.get_workload("vllm")["id"]
     result = {}
     stressor = threading.Thread(
-        target=lambda: result.update(run_gpu_pressure(2048, 45, tmp_path / "r.json")))
+        target=lambda: result.update(run_gpu_pressure(2048, 45, tmp_path / "r.json",
+                                                  limits=STRESSOR_LIMITS)))
     try:
         docker("pause", NAME)                                   # the hang comes first
         inc = engine.tick()

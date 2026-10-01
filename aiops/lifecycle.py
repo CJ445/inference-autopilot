@@ -238,8 +238,11 @@ def start(config_path, stop_event, out=print, doctor=run_doctor, build=build_eng
         return 1
     info = {"profile": profile["name"], "provider": profile["provider"],
             "workload": profile["workload"]["name"], "pid": os.getpid()}
+    if profile["workload"].get("model"):
+        info["model"] = profile["workload"]["model"]
     try:
-        service = service_cls(engine, port=cp["port"], interval=cp["interval"], info=info)
+        service = service_cls(engine, port=cp["port"], interval=cp["interval"], info=info,
+                              status_extra=lambda: {"watchdog": _watchdog_status(profile)})
     except OSError as e:
         out(f"refusing to start: cannot bind 127.0.0.1:{cp['port']}: {e} (is the port in use?)")
         return 1

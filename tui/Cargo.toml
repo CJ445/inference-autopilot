@@ -1,0 +1,22 @@
+[package]
+name = "aiops-tui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Operator TUI for Inference Autopilot: a client of the local control-plane HTTP API"
+publish = false
+
+[lib]
+name = "aiops_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aiops-tui"
+path = "src/main.rs"
+
+# Deliberately tiny: no HTTP-client crate (the API is plain http on loopback), no async runtime.
+[dependencies]
+ratatui = { version = "=0.26.3", default-features = false, features = ["crossterm"] }
+crossterm = "0.27"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

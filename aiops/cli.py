@@ -1,15 +1,19 @@
 """`aiops <command>`: start | stop | status | doctor (and the older `serve`)."""
 import argparse
 import json
+import os
 import signal
 import sys
 import threading
+from pathlib import Path
 
 from aiops import lifecycle
 from aiops.doctor import FAIL, format_results, run_doctor
 from aiops.profile import ProfileError, load_profile
 
-USAGE = "usage: aiops {start|stop|status|doctor} [--config PATH] [--json]   (or: aiops serve ...)"
+USAGE = ("usage: aiops {start|stop|status|doctor} [--config PATH] [--json]\n"
+         "       aiops tui [--config PATH] [--url URL] [-- TUI ARGS]   (the operator terminal UI)\n"
+         "       aiops serve ...   (unmanaged legacy)")
 
 
 def build_parser():
@@ -48,8 +52,49 @@ def _status(args):
     return lifecycle.EXIT_RUNNING if s["control_plane"]["state"] == "running" else lifecycle.EXIT_STOPPED
 
 
+TUI_BUILD = "cargo build --release --manifest-path tui/Cargo.toml"
+
+
+def _tui_binary():
+    """The Rust operator TUI: $AIOPS_TUI_BIN, else the release or debug build in this checkout."""
+    explicit = os.environ.get("AIOPS_TUI_BIN")
+    if explicit:
+        return Path(explicit)
+    root = Path(__file__).resolve().parent.parent / "tui" / "target"
+    return next((p for p in (root / "release" / "aiops-tui", root / "debug" / "aiops-tui")
+                 if p.exists()), root / "release" / "aiops-tui")
+
+
+def _tui(argv):
+    """Hand the terminal to the Rust TUI. It is a client of the HTTP API only: this command
+    starts no control plane, reads no state and touches no database."""
+    parser = argparse.ArgumentParser(prog="aiops tui")
+    parser.add_argument("--config", default="aiops.toml")
+    parser.add_argument("--url")
+    args, extra = parser.parse_known_args(argv)
+    if args.url:
+        url = args.url
+    else:
+        try:
+            url = f"http://127.0.0.1:{load_profile(args.config)['control_plane']['port']}"
+        except ProfileError as e:
+            print(f"configuration error: {e}")
+            return 2
+    binary = _tui_binary()
+    if not binary.exists():
+        print(f"the operator TUI is not built ({binary}).\nBuild it once with: {TUI_BUILD}")
+        return 1
+    if not os.access(binary, os.X_OK):
+        print(f"{binary} is not executable")
+        return 1
+    sys.stdout.flush()
+    os.execv(str(binary), [str(binary), "--url", url, *extra])   # replaces this process
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["tui"]:
+        return _tui(argv[1:])
     if argv[:1] == ["serve"]:
         from aiops.serve import main as serve_main
         return serve_main(argv[1:])

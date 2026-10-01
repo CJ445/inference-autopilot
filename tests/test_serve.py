@@ -73,7 +73,7 @@ def test_tick_loop_survives_unexpected_errors():
         svc.stop()
 
 
-def test_api_requests_use_the_lock_supplied_by_the_caller():
+def test_writes_use_the_lock_supplied_by_the_caller_and_reads_do_not():
     lock = threading.Lock()
     server = make_server(Engine(World(), World(), CONFIG), port=0, lock=lock)
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01},
@@ -82,12 +82,22 @@ def test_api_requests_use_the_lock_supplied_by_the_caller():
     done = threading.Event()
     try:
         with lock:  # e.g. the tick loop is mid-tick
-            threading.Thread(target=lambda: (http(base, "/health"), done.set()),
+            assert http(base, "/health")["status"] == "HEALTHY"    # a read answers immediately
+            threading.Thread(target=lambda: (_post_expecting_404(base), done.set()),
                              daemon=True).start()
-            assert not done.wait(0.3)  # request waits for the engine
+            assert not done.wait(0.3)                              # a write waits for the engine
         assert done.wait(3)
     finally:
         server.shutdown()
+
+
+def _post_expecting_404(base):
+    req = urllib.request.Request(base + "/api/v1/incidents/none/remediation/approve",
+                                 method="POST", data=b"")
+    try:
+        urllib.request.urlopen(req, timeout=5)
+    except urllib.error.HTTPError as e:
+        assert e.code == 404
 
 
 def test_cli_has_safe_defaults_and_requires_an_explicit_cluster_context():

@@ -1,0 +1,81 @@
+{
+ "incident_id": "inc_001",
+ "service": "vllm",
+ "category": "INFERENCE_UNRESPONSIVE",
+ "status": "INSUFFICIENT_EVIDENCE",
+ "evidence": [
+  {
+   "evidence_id": "inc_001_ev_1",
+   "source": "nvidia-smi",
+   "metric": "gpu_memory_used_bytes",
+   "query": null,
+   "value": 3035136000.0,
+   "relation": "supports",
+   "source_type": "real",
+   "incident_id": "inc_001",
+   "resource": "GPU-1e5dd8d1-7112-3d8d-c5cc-4f56f97fa24f"
+  },
+  {
+   "evidence_id": "inc_001_ev_2",
+   "source": "vllm-probe",
+   "metric": "inference_probe",
+   "query": null,
+   "value": {
+    "ok": false,
+    "latency_ms": 3004.0,
+    "error": "timeout"
+   },
+   "relation": "supports",
+   "source_type": "real",
+   "incident_id": "inc_001",
+   "resource": "GPU-1e5dd8d1-7112-3d8d-c5cc-4f56f97fa24f"
+  },
+  {
+   "evidence_id": "inc_001_ev_3",
+   "source": "vllm-metrics",
+   "metric": "vllm_metrics",
+   "query": null,
+   "value": {
+    "available": false
+   },
+   "relation": "supports",
+   "source_type": "real",
+   "incident_id": "inc_001",
+   "resource": "GPU-1e5dd8d1-7112-3d8d-c5cc-4f56f97fa24f"
+  }
+ ],
+ "timeline": [
+  {
+   "state": "DETECTED",
+   "at": "2026-10-01T15:02:11.100000+00:00"
+  },
+  {
+   "state": "TRIAGING",
+   "at": "2026-10-01T15:02:11.100000+00:00"
+  },
+  {
+   "state": "DIAGNOSED",
+   "at": "2026-10-01T15:02:12.000000+00:00"
+  },
+  {
+   "state": "PROPOSED",
+   "at": "2026-10-01T15:02:12.000000+00:00"
+  },
+  {
+   "state": "POLICY_CHECK",
+   "at": "2026-10-01T15:02:12.000000+00:00"
+  }
+ ],
+ "proposal": null,
+ "rca": {
+  "root_cause": null,
+  "evidence_ids": [],
+  "insufficient_evidence": true
+ },
+ "remediation": {
+  "state": "NOT_STARTED"
+ },
+ "verification": {
+  "checks": null
+ }
+}

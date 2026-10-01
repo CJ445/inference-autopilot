@@ -696,3 +696,25 @@ def test_disarming_never_interferes_with_a_watchdog_that_is_already_aborting(tmp
     finally:
         child.kill()
         child.wait()
+
+
+# --- the running control plane tells the operator TUI about its watchdog and model ---------
+
+def test_a_running_control_plane_reports_its_watchdog_and_model_through_the_api(
+        tmp_path, config):
+    from aiops.profile import load_profile
+
+    port = load_profile(config)["control_plane"]["port"]
+    r = Running(config)
+    try:
+        wait_for(lambda: read_state(state_path(tmp_path)))
+        wait_for(lambda: http(port, "/health")["status"] == "HEALTHY")
+        write_wd_state(tmp_path)                       # the (fake) watchdog's published record
+        st = http(port, "/api/v1/status")
+        assert st["info"]["model"] == "facebook/opt-125m" and st["info"]["workload"] == "vllm"
+        assert st["watchdog"]["state"] == "armed" and st["watchdog"]["protected_pid"] == os.getpid()
+        assert st["audit"]["valid"] is True
+        write_wd_state(tmp_path, status="ABORTED", reason=["ram_percent"])
+        assert http(port, "/api/v1/status")["watchdog"]["state"] == "aborted"
+    finally:
+        r.finish()
