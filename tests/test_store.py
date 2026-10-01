@@ -217,3 +217,43 @@ def test_rejection_that_cannot_be_persisted_is_not_half_applied(tmp_path):
     fix_db(db)
     e.reject(inc.incident_id)
     assert inc.status == "REJECTED"
+
+
+# --- read-only access, for status and doctor --------------------------------------------
+
+def test_a_read_only_store_never_creates_a_missing_database(tmp_path):
+    db = tmp_path / "absent.db"
+    with pytest.raises(StoreUnavailable):
+        Store(db, readonly=True)
+    assert not db.exists()
+
+
+def test_a_read_only_store_loads_state_and_verifies_the_audit_chain(tmp_path):
+    db = tmp_path / "aiops.db"
+    w = faulted_world()
+    inc = Engine(w, w, CONFIG, store=Store(db)).tick()
+    incidents, pending, audit = Store(db, readonly=True).load()
+    assert [i.incident_id for i in incidents] == [inc.incident_id]
+    assert list(pending) == [inc.incident_id] and audit.verify() and len(audit.events) == 4
+
+
+def test_a_read_only_store_cannot_write(tmp_path):
+    db = tmp_path / "aiops.db"
+    w = faulted_world()
+    Engine(w, w, CONFIG, store=Store(db)).tick()
+    store = Store(db, readonly=True)
+    incidents, pending, audit = store.load()
+    before = db.read_bytes()
+    with pytest.raises(StoreUnavailable):
+        store.save(incidents, {}, audit)
+    assert db.read_bytes() == before
+
+
+def test_a_read_only_store_still_detects_a_tampered_audit_chain(tmp_path):
+    db = tmp_path / "aiops.db"
+    w = faulted_world()
+    Engine(w, w, CONFIG, store=Store(db)).tick()
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE audit SET data = '{\"incident_id\": \"forged\"}' WHERE seq = 0")
+    with pytest.raises(AuditTampered):
+        Store(db, readonly=True).load()

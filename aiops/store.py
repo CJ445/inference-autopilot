@@ -1,5 +1,7 @@
 import json
+import os
 import sqlite3
+from pathlib import Path
 
 from aiops.audit import AuditLog
 from aiops.incident import Incident
@@ -16,8 +18,12 @@ class StoreUnavailable(Exception):
 class Store:
     """SQLite persistence for incidents, pending proposals and the audit chain (PRD §58)."""
 
-    def __init__(self, path):
-        self.path = str(path)
+    def __init__(self, path, readonly=False):
+        self.path, self.readonly = str(path), readonly
+        if readonly:  # status/doctor: never create, never write
+            if not os.path.exists(self.path):
+                raise StoreUnavailable(f"no database at {self.path}")
+            return
         with self._conn() as c:
             c.executescript("""
                 CREATE TABLE IF NOT EXISTS incidents (id TEXT PRIMARY KEY, data TEXT);
@@ -27,6 +33,8 @@ class Store:
             """)
 
     def _conn(self):
+        if self.readonly:
+            return sqlite3.connect(f"{Path(self.path).resolve().as_uri()}?mode=ro", uri=True)
         return sqlite3.connect(self.path)
 
     def save(self, incidents, pending, audit):
@@ -49,6 +57,15 @@ class Store:
                  for n, e in enumerate(audit.events)])
 
     def load(self):
+        try:
+            incidents, pending, audit = self._load()
+        except sqlite3.Error as e:
+            raise StoreUnavailable(str(e)) from e
+        if not audit.verify():
+            raise AuditTampered("audit hash chain does not verify")
+        return incidents, pending, audit
+
+    def _load(self):
         with self._conn() as c:
             incidents = [Incident.from_dict(json.loads(d)) for (d,) in
                          c.execute("SELECT data FROM incidents ORDER BY id")]
@@ -57,6 +74,4 @@ class Store:
             audit = AuditLog()
             audit.events = [{"event": e, "data": json.loads(d), "prev": p, "hash": h}
                             for e, d, p, h in rows]
-        if not audit.verify():
-            raise AuditTampered("audit hash chain does not verify")
         return incidents, pending, audit

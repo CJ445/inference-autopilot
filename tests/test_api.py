@@ -146,3 +146,25 @@ def test_a_busy_workload_is_a_409_policy_denied_and_changes_nothing(api):
     status, body = call(base, f"/api/v1/incidents/{inc.incident_id}/remediation/approve", "POST")
     assert status == 409 and body["error"]["code"] == "POLICY_DENIED"
     assert w.restarts == 0
+
+
+def test_status_endpoint_reports_health_last_observation_and_incident_ids(api):
+    base, engine, _ = api
+    assert call(base, "/api/v1/status")[1]["last_observation"] is None
+    inc = engine.tick()
+    status, body = call(base, "/api/v1/status")
+    assert status == 200 and body["health"] == "HEALTHY"
+    assert body["last_observation"]["gpu_memory_used_bytes"] > 0 and body["last_observed_at"]
+    assert body["incidents"] == {"active": [inc.incident_id], "pending": [inc.incident_id]}
+
+
+def test_status_endpoint_includes_static_info_supplied_by_the_service():
+    w = World()
+    server = make_server(Engine(w, w, CONFIG), port=0, info={"profile": "docker-real-gpu"})
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01},
+                     daemon=True).start()
+    try:
+        assert call(f"http://127.0.0.1:{server.server_port}", "/api/v1/status")[1]["info"] == {
+            "profile": "docker-real-gpu"}
+    finally:
+        server.shutdown()

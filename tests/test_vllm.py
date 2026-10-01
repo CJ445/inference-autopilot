@@ -38,7 +38,8 @@ class Server:
             def do_GET(self):
                 outer.requests.append(("GET", self.path))
                 body = outer.metrics_text.encode()
-                self.send_response(200 if self.path == "/metrics" else 404)
+                ok = self.path in ("/metrics", "/health")
+                self.send_response(200 if ok else 404)
                 self.end_headers()
                 self.wfile.write(body if self.path == "/metrics" else b"")
 

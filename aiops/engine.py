@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from aiops.audit import AuditLog
 from aiops.detector import detect_gpu_memory_pressure, detect_inference_unresponsive
 from aiops.incident import Incident
@@ -30,6 +32,7 @@ class Engine:
         self.telemetry, self.cluster, self.config, self.store = telemetry, cluster, config, store
         self.incidents, self.pending = [], {}
         self.audit, self.health = AuditLog(), "HEALTHY"
+        self.last_observation, self.last_observed_at = None, None
         if store:
             self.incidents, self.pending, self.audit = store.load()
             self._close_interrupted()
@@ -69,6 +72,8 @@ class Engine:
             self.health = "DEGRADED"  # never fabricate metrics
             return None
         self.health = "HEALTHY"
+        self.last_observation = observed
+        self.last_observed_at = datetime.now(timezone.utc).isoformat()
 
         category = self._detect(observed)
         self._clear_gone_conditions(category)

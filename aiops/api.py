@@ -5,14 +5,14 @@ import traceback
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from aiops.engine import NothingToApprove, WorkloadBusy
+from aiops.engine import CLOSED, NothingToApprove, WorkloadBusy
 from aiops.store import StoreUnavailable
 
 ROUTE = re.compile(
     r"^/api/v1/incidents(?:/(?P<id>[^/]+)(?P<action>/remediation/(?:approve|reject))?)?$")
 
 
-def make_server(engine, host="127.0.0.1", port=8080, lock=None):
+def make_server(engine, host="127.0.0.1", port=8080, lock=None, info=None):
     """Local control API (PRD §55). One lock serialises access to the engine."""
     lock = lock or threading.Lock()
 
@@ -40,6 +40,14 @@ def make_server(engine, host="127.0.0.1", port=8080, lock=None):
         def _dispatch(self, method):
             if method == "GET" and self.path == "/health":
                 return self._send(200, {"status": engine.health})
+            if method == "GET" and self.path == "/api/v1/status":
+                return self._send(200, {
+                    "health": engine.health, "last_observed_at": engine.last_observed_at,
+                    "last_observation": engine.last_observation,
+                    "incidents": {"active": [i.incident_id for i in engine.incidents
+                                             if i.status not in CLOSED],
+                                  "pending": list(engine.pending)},
+                    "info": info or {}})
             m = ROUTE.match(self.path)
             if not m:
                 return self._error(404, "NOT_FOUND", "unknown path")

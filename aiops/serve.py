@@ -5,24 +5,13 @@ import threading
 import traceback
 
 from aiops.api import make_server
-from aiops.engine import Engine
-from aiops.kubectl import KubernetesProvider
-from aiops.prometheus import PrometheusAdapter
-from aiops.store import Store
-
-# PromQL for the signals the engine reads (the CPU stand-in's labels; see deploy/kubernetes).
-QUERIES = {
-    "gpu_memory_used_bytes": 'gpu_memory_used_bytes{job="vllm"}',
-    "error_rate": 'error_rate{job="vllm"}',
-    "allocation_failures_total": 'allocation_failures_total{job="vllm"}',
-}
-
+from aiops.runtime import QUERIES, build_engine  # noqa: F401  (QUERIES re-exported)
 
 class Service:
-    def __init__(self, engine, port, interval):
+    def __init__(self, engine, port, interval, info=None):
         self.engine, self.interval = engine, interval
         self._lock, self._stop = threading.Lock(), threading.Event()
-        self.server = make_server(engine, port=port, lock=self._lock)  # loopback only
+        self.server = make_server(engine, port=port, lock=self._lock, info=info)  # loopback only
         self.port = self.server.server_address[1]
         self._threads = []
 
@@ -68,12 +57,16 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    prom = PrometheusAdapter(args.prometheus_url, QUERIES)
-    cluster = KubernetesProvider(args.namespace, context=args.context, metrics_source=prom)
-    config = {"service": "vllm", "workload": args.workload, "gpu_threshold": args.gpu_threshold,
-              "error_rate_limit": args.error_rate_limit}
-    service = Service(Engine(prom, cluster, config, store=Store(args.db)),
-                      port=args.port, interval=args.interval)
+    profile = {  # the same builder `aiops start` uses, fed from flags instead of a file
+        "name": "kubernetes", "provider": "kubernetes",
+        "control_plane": {"db": args.db},
+        "workload": {"name": args.workload, "namespace": args.namespace,
+                     "context": args.context, "prometheus_url": args.prometheus_url},
+        "safety": {"gpu_memory_threshold_bytes": args.gpu_threshold,
+                   "error_rate_limit": args.error_rate_limit},
+        "verification": {"timeout": 60, "interval": 2},
+    }
+    service = Service(build_engine(profile), port=args.port, interval=args.interval)
 
     done = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):

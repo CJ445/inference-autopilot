@@ -1,0 +1,22 @@
+# Kubernetes profile (the CPU stand-in workload, Prometheus telemetry). No Kubernetes GPU.
+profile = "kubernetes"
+
+[control_plane]
+port = 8080
+db = "aiops.db"
+state_file = "aiops.state.json"
+interval = 5
+
+[workload]
+name = "vllm-0"
+namespace = "default"
+context = "kind-aiops-test"          # mandatory; never defaults to the current context
+prometheus_url = "http://127.0.0.1:19090"
+
+[safety]
+gpu_memory_threshold_bytes = 7500000000
+error_rate_limit = 0.05
+
+[verification]
+timeout = 60
+interval = 2

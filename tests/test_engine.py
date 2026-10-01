@@ -149,3 +149,21 @@ def test_rejected_incident_does_not_block_a_new_incident_for_a_new_fault():
     first = e.tick()
     e.reject(first.incident_id)
     assert e.tick() is not first
+
+
+def test_engine_remembers_the_last_real_observation_and_when_it_was_made():
+    w = World()
+    e = engine(w)
+    assert e.last_observation is None and e.last_observed_at is None
+    e.tick()
+    assert e.last_observation == w.metrics() and e.last_observed_at.endswith("+00:00")
+
+
+def test_an_outage_does_not_overwrite_the_last_good_observation():
+    w = World()
+    e = engine(w)
+    e.tick()
+    good, when = e.last_observation, e.last_observed_at
+    w.down = True
+    e.tick()
+    assert e.health == "DEGRADED" and e.last_observation == good and e.last_observed_at == when
