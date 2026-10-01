@@ -26,6 +26,13 @@ class WorkloadBusy(Exception):
     """Another incident holds this workload; at most one remediation per workload (PRD §130)."""
 
 
+# A single failed inference probe is not an incident: it must fail on this many CONSECUTIVE ticks
+# (the transition when a workload comes up, or one dropped request, otherwise opens a restart
+# proposal for a workload that is fine). At the 5 s default tick that is about one extra tick of
+# detection latency. GPU memory pressure is unaffected.
+UNRESPONSIVE_TICKS = 2
+
+
 class Engine:
     """One tick: observe -> detect -> incident -> evidence -> RCA -> pending proposal."""
 
@@ -33,6 +40,7 @@ class Engine:
         self.telemetry, self.cluster, self.config, self.store = telemetry, cluster, config, store
         self.presence = presence      # optional read-only "is the workload there?" (docker only)
         self.workload_state = None    # 'absent'|'stopped'|'starting'|'running'|'unknown'|None
+        self._unresponsive_streak = 0  # consecutive ticks on which the inference probe failed
         self.incidents, self.pending = [], {}
         self.audit, self.health = AuditLog(), "HEALTHY"
         self.last_observation, self.last_observed_at = None, None
@@ -83,11 +91,13 @@ class Engine:
             # remediate. No incident, no proposal, and no stale reading kept as if it were current.
             self.health = "HEALTHY"
             self.last_observation = self.last_observed_at = None
+            self._unresponsive_streak = 0     # the workload is gone: nothing carries over
             return None
         try:
             observed = self.telemetry.metrics()
         except TelemetryError:
             self.health = "DEGRADED"  # never fabricate metrics
+            self._unresponsive_streak = 0     # no valid observation: the streak is broken
             return None
         self.health = "HEALTHY"
         self.last_observation = observed
@@ -96,6 +106,7 @@ class Engine:
             # Inside Docker's own start period (the model is loading): observed and shown, but
             # not yet expected to answer, so a failing probe is not an incident. Detection resumes
             # the moment Docker reports it healthy or unhealthy.
+            self._unresponsive_streak = 0
             return None
 
         category = self._detect(observed)
@@ -120,11 +131,14 @@ class Engine:
         return incident
 
     def _detect(self, observed):
-        """Memory pressure keeps precedence; an unresponsive probe is its own condition."""
+        """Memory pressure keeps precedence; an unresponsive probe is its own condition, and only
+        once it has failed on UNRESPONSIVE_TICKS consecutive ticks (a success resets the count)."""
+        failing = bool(detect_inference_unresponsive(observed))
+        self._unresponsive_streak = self._unresponsive_streak + 1 if failing else 0
         if detect_gpu_memory_pressure(observed["gpu_memory_used_bytes"],
                                       self.config["gpu_threshold"]):
             return "GPU_MEMORY_PRESSURE"
-        if detect_inference_unresponsive(observed):
+        if failing and self._unresponsive_streak >= UNRESPONSIVE_TICKS:
             return "INFERENCE_UNRESPONSIVE"
         return None
 
@@ -196,6 +210,7 @@ class Engine:
                         "error_rate": c.get("error_rate_limit", 0.05)},
                 timeout=c.get("timeout", 60), interval=c.get("interval", 2),
                 on_executing=self._persist, verify=verify)
+        self._unresponsive_streak = 0         # a restart makes it a new instance: count afresh
         self._persist()
 
     def reject(self, incident_id):

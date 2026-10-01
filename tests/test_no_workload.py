@@ -122,7 +122,8 @@ def test_a_present_workload_that_does_not_answer_is_still_diagnosed_as_before(tm
     cfg = make_config(tmp_path, url="http://127.0.0.1:1")
     engine = build_engine(load_profile(cfg), run=system)
     engine.tick()
-    assert engine.workload_state == "running"
+    assert engine.workload_state == "running" and engine.incidents == []   # one failure: not yet
+    engine.tick()                                                          # the second, consecutive
     assert [i.category for i in engine.incidents] == ["INFERENCE_UNRESPONSIVE"]
     assert list(engine.pending.values())[0]["action"] == "restart_workload"
 
@@ -198,5 +199,6 @@ def test_a_workload_inside_its_start_period_is_observed_but_not_diagnosed_until_
     assert engine.incidents == [] and engine.pending == {}
     system.health = "unhealthy"                                       # the start period is over
     engine.tick()
-    assert engine.workload_state == "running"
+    assert engine.workload_state == "running" and engine.incidents == []   # failure 1, counted afresh
+    engine.tick()
     assert [i.category for i in engine.incidents] == ["INFERENCE_UNRESPONSIVE"]

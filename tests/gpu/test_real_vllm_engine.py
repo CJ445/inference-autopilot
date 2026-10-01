@@ -106,7 +106,9 @@ def test_paused_vllm_is_diagnosed_approved_restarted_and_verified_by_real_infere
 
     try:
         docker("pause", NAME)                                     # the bounded, reversible fault
-        inc = engine.tick()
+        assert engine.tick() is None and engine.incidents == []   # one failed probe: not yet (ADR-027)
+        assert engine.pending == {}
+        inc = engine.tick()                                       # the second consecutive failure
         assert inc.category == "INFERENCE_UNRESPONSIVE" and inc.status == "POLICY_CHECK"
         assert [i.category for i in engine.incidents] == ["INFERENCE_UNRESPONSIVE"]
         by_metric = {e["metric"]: e for e in inc.evidence}
@@ -152,7 +154,8 @@ def test_real_pressure_on_top_of_a_held_hang_opens_no_second_incident_or_proposa
                                                   limits=STRESSOR_LIMITS)))
     try:
         docker("pause", NAME)                                   # the hang comes first
-        inc = engine.tick()
+        assert engine.tick() is None and engine.incidents == []  # one failed probe: not yet (ADR-027)
+        inc = engine.tick()                                     # the second consecutive failure
         assert inc.category == "INFERENCE_UNRESPONSIVE" and inc.status == "POLICY_CHECK"
 
         stressor.start()                                        # then real memory pressure

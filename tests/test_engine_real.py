@@ -2,7 +2,7 @@
 import pytest
 from test_engine import World
 
-from aiops.engine import Engine, NothingToApprove
+from aiops.engine import UNRESPONSIVE_TICKS, Engine, NothingToApprove
 from aiops.rca import diagnose
 from aiops.telemetry import RealTelemetry
 
@@ -39,6 +39,13 @@ class Rig:
 
     def fail_probe(self):
         self.vllm.ok, self.vllm.error = False, "timeout"
+
+    def detect(self):
+        """The ticks an unresponsive workload now needs before an incident opens (the last result)."""
+        result = None
+        for _ in range(UNRESPONSIVE_TICKS):
+            result = self.engine.tick()
+        return result
 
 
 def test_memory_pressure_plus_failing_probe_is_diagnosed_from_real_sources():
@@ -79,7 +86,7 @@ def test_healthy_gpu_and_successful_probe_create_no_incident():
 def test_normal_gpu_with_a_failed_probe_is_inference_unresponsive_from_real_evidence():
     r = Rig(memory_bytes=2.9e9)   # memory well under the threshold: NOT pressure
     r.fail_probe()
-    inc = r.engine.tick()
+    inc = r.detect()
     assert inc.category == "INFERENCE_UNRESPONSIVE" and inc.status == "POLICY_CHECK"
     by_metric = {e["metric"]: e for e in inc.evidence}
     probe = by_metric["inference_probe"]
@@ -98,7 +105,7 @@ def test_normal_gpu_with_a_failed_probe_is_inference_unresponsive_from_real_evid
 def test_unresponsive_incident_is_deduplicated_across_ticks():
     r = Rig(memory_bytes=2.9e9)
     r.fail_probe()
-    first = r.engine.tick()
+    first = r.detect()
     assert r.engine.tick() is first and len(r.engine.incidents) == 1
 
 
@@ -227,7 +234,7 @@ def verification_checks(engine):
 
 def test_hung_workload_restart_with_real_inference_recovery_is_verified_and_resolved():
     r = approved_rig()
-    inc = r.engine.tick()
+    inc = r.detect()
     assert inc.category == "INFERENCE_UNRESPONSIVE" and r.cluster.restarts == 0
     r.engine.approve(inc.incident_id)
     assert inc.status == "RESOLVED" and r.cluster.restarts == 1
@@ -238,7 +245,7 @@ def test_hung_workload_restart_with_real_inference_recovery_is_verified_and_reso
 
 def test_restart_that_does_not_restore_inference_stays_unresolved():
     r = approved_rig(recovers=False)
-    inc = r.engine.tick()
+    inc = r.detect()
     r.engine.approve(inc.incident_id)
     assert inc.status == "UNRESOLVED"
     assert verification_checks(r.engine)["inference_probe_stable"] is False
@@ -246,7 +253,7 @@ def test_restart_that_does_not_restore_inference_stays_unresolved():
 
 def test_restart_that_changed_nothing_stays_unresolved_even_if_inference_answers():
     r = approved_rig(changes_identity=False)
-    inc = r.engine.tick()
+    inc = r.detect()
     r.engine.approve(inc.incident_id)
     assert inc.status == "UNRESOLVED"
     assert verification_checks(r.engine)["workload_restarted"] is False
@@ -274,7 +281,7 @@ def suppressed(engine):
 def test_pressure_arriving_while_an_unresponsive_incident_holds_the_workload_opens_nothing():
     r = Rig(memory_bytes=2.9e9)
     r.fail_probe()
-    first = r.engine.tick()
+    first = r.detect()
     assert first.category == "INFERENCE_UNRESPONSIVE" and first.status == "POLICY_CHECK"
 
     r.memory = 5.2e9   # pressure appears on top of the hang
@@ -303,12 +310,12 @@ def test_unresponsive_arriving_while_a_pressure_incident_holds_the_workload_open
 @pytest.mark.parametrize("release", ["reject", "resolve"])
 def test_the_workload_is_released_when_the_holder_closes(release):
     r = approved_rig()                       # hung workload, restart will recover it
-    first = r.engine.tick()
+    first = r.detect()
     getattr(r.engine, "approve" if release == "resolve" else "reject")(first.incident_id)
     assert first.status in ("RESOLVED", "REJECTED")
 
     r.fail_probe()                           # the condition returns
-    second = r.engine.tick()
+    second = r.detect()
     assert second is not first and second.incident_id == "inc_002"
     assert list(r.engine.pending) == [second.incident_id]
 
@@ -327,7 +334,7 @@ def inject(engine, incident_id, status, pending=True, workload="vllm"):
 
 def test_approve_refuses_while_another_incident_is_executing_the_same_workload():
     r = approved_rig()
-    first = r.engine.tick()
+    first = r.detect()
     inject(r.engine, "inc_900", "EXECUTING", pending=False)
     events = len(r.engine.audit.events)
     with pytest.raises(WorkloadBusy):
@@ -338,7 +345,7 @@ def test_approve_refuses_while_another_incident_is_executing_the_same_workload()
 
 def test_two_pending_proposals_for_one_workload_block_both_approvals_but_not_rejection():
     r = approved_rig()
-    first = r.engine.tick()
+    first = r.detect()
     second = inject(r.engine, "inc_900", "POLICY_CHECK")
     for incident in (first, second):
         with pytest.raises(WorkloadBusy):
@@ -352,7 +359,7 @@ def test_two_pending_proposals_for_one_workload_block_both_approvals_but_not_rej
 
 def test_a_proposal_for_a_different_workload_does_not_block_approval():
     r = approved_rig()
-    first = r.engine.tick()
+    first = r.detect()
     inject(r.engine, "inc_900", "POLICY_CHECK", workload="some-other-workload")
     r.engine.approve(first.incident_id)
     assert first.status == "RESOLVED"
@@ -370,7 +377,73 @@ def test_unexpected_verification_crash_on_the_real_path_is_unresolved_not_stuck(
     r.cluster = Crashing(r)
     r.engine = Engine(r.telemetry, r.cluster, {**CONFIG, "stable_probes": 3,
                                                 "probe_interval": 0})
-    inc = r.engine.tick()
+    inc = r.detect()
     r.engine.approve(inc.incident_id)
     assert inc.status == "UNRESOLVED"
     assert verification_checks(r.engine) == {"verification_error": False}
+
+
+# --- a single failed probe is not an incident ---------------------------------------------------
+
+def test_one_failed_probe_opens_nothing_and_a_success_resets_the_count():
+    r = Rig()
+    r.fail_probe()
+    assert r.engine.tick() is None                       # first failure: no incident, no proposal
+    assert r.engine.incidents == [] and r.engine.pending == {}
+    assert r.engine.audit.events == []                    # nothing was even recorded
+    r.vllm.ok, r.vllm.error = True, None
+    assert r.engine.tick() is None                        # recovered: the count resets
+    r.fail_probe()
+    assert r.engine.tick() is None                        # one failure again is still not enough
+    assert r.engine.incidents == []
+
+
+def test_the_second_consecutive_failure_opens_the_incident_with_the_usual_evidence():
+    r = Rig()
+    r.fail_probe()
+    assert r.engine.tick() is None
+    inc = r.engine.tick()
+    assert inc.category == "INFERENCE_UNRESPONSIVE" and inc.status == "POLICY_CHECK"
+    assert {e["metric"] for e in inc.evidence} >= {"inference_probe", "gpu_memory_used_bytes"}
+    assert r.engine.pending[inc.incident_id]["action"] == "restart_workload"
+
+
+def test_a_degraded_observation_breaks_the_streak():
+    from aiops.prometheus import TelemetryError
+    r = Rig()
+    r.fail_probe()
+    r.engine.tick()                                       # failure 1
+    r.telemetry.gpu = lambda: (_ for _ in ()).throw(TelemetryError("nvidia-smi gone"))
+    assert r.engine.tick() is None and r.engine.health == "DEGRADED"
+    r.telemetry.gpu = r._gpu
+    assert r.engine.tick() is None                        # failure 1 again, not 2
+    assert r.engine.incidents == []
+
+
+@pytest.mark.parametrize("state", ["absent", "stopped", "starting"])
+def test_the_streak_does_not_survive_the_workload_going_away_or_restarting(state):
+    r = Rig()
+    r.fail_probe()
+    r.engine.tick()                                       # failure 1
+    r.engine.presence = lambda: state
+    r.engine.tick()                                       # not observed: the count is reset
+    r.engine.presence = lambda: "running"
+    assert r.engine.tick() is None                        # failure 1 of a NEW run, not 2
+    assert r.engine.incidents == []
+    assert r.engine.tick() is not None                    # failure 2: now it is an incident
+
+
+def test_memory_pressure_is_not_debounced():
+    r = Rig(memory_bytes=5.2e9)
+    r.fail_probe()
+    assert r.engine.tick().category == "GPU_MEMORY_PRESSURE"        # first tick, as before
+
+
+def test_the_count_starts_afresh_after_a_remediation_restart():
+    r = approved_rig()
+    inc = r.detect()
+    r.engine.approve(inc.incident_id)
+    assert inc.status == "RESOLVED"
+    r.fail_probe()                                        # it hangs again after the restart
+    assert r.engine.tick() is None                        # a new instance: one failure is not enough
+    assert r.engine.tick().incident_id != inc.incident_id

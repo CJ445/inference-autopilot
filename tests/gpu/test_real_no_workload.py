@@ -59,8 +59,13 @@ def test_aiops_opens_with_no_workload_and_follows_it_as_the_operator_starts_and_
             request.getfixturevalue("vllm")           # the harness provisions it, not aiops
             assert t.wait_screen("Probe ✓", timeout=120) and t.wait_screen("Metrics ✓")
             assert "No workload running" not in t.vs.text()
-            assert http(c.port, "/api/v1/status")["workload"]["state"] == "running"
-            # the model load (Docker's start period) was NOT an unresponsive workload
+            # Docker's health check lags real recovery (ADR-018): telemetry is shown while it still
+            # says `starting`; the state then settles on `running`. Never absent/stopped here.
+            assert http(c.port, "/api/v1/status")["workload"]["state"] in ("starting", "running")
+            wait_for(lambda: http(c.port, "/api/v1/status")["workload"]["state"] == "running",
+                     60, "the workload to settle on running")
+            # neither the model load (Docker's start period) nor a single failed probe at the moment
+            # it turns healthy (ADR-027: two consecutive failures are required) is an incident
             assert http(c.port, "/api/v1/incidents")["incidents"] == []
 
             # -- stopped, then removed: back to the unavailable state, still no incident --------
