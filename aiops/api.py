@@ -14,14 +14,22 @@ ROUTE = re.compile(
 
 
 AUDIT_DEFAULT_LIMIT, AUDIT_MAX_LIMIT = 200, 1000
+CONTROL_STOP = "/api/v1/control/stop"
+# A browser cannot attach a custom header to a cross-origin request without a preflight this API
+# never answers, so requiring it keeps a web page from stopping the control plane.
+STOP_CONFIRM_HEADER, STOP_CONFIRM_VALUE = "X-Aiops-Confirm", "stop-control-plane"
 
 
-def make_server(engine, host="127.0.0.1", port=8080, lock=None, info=None, status_extra=None):
+def make_server(engine, host="127.0.0.1", port=8080, lock=None, info=None, status_extra=None,
+                system=None):
     """Local control API (PRD §55).
 
     One lock serialises WRITES to the engine. Reads (GET) do not take it: a tick or a remediation
     can hold it for seconds to minutes, and an operator must be able to see live state exactly
     then. Reads only look at in-memory state and retry if it changes under them.
+
+    `system` (optional, `aiops.system.System`) adds read-only version/config/diagnostics and the
+    one confirmed control-plane stop. Without it (the legacy `serve`) those paths do not exist.
     """
     lock = lock or threading.Lock()
 
@@ -72,9 +80,9 @@ def make_server(engine, host="127.0.0.1", port=8080, lock=None, info=None, statu
             self._route("POST")
 
         def _route(self, method):
-            if method == "GET":
-                self._guarded(method)          # reads never wait for the engine lock
-            else:
+            if method == "GET" or urlsplit(self.path).path == CONTROL_STOP:
+                self._guarded(method)          # reads, and a stop request, never wait for the
+            else:                              # engine lock (a remediation may hold it for minutes)
                 with lock:                     # writes (approve/reject) stay serialised
                     self._guarded(method)
 
@@ -122,6 +130,8 @@ def make_server(engine, host="127.0.0.1", port=8080, lock=None, info=None, statu
                     return self._error(400, "INVALID_REQUEST",
                                        f"limit must be an integer from 1 to {AUDIT_MAX_LIMIT}")
                 return self._send(200, body)
+            if path in ("/api/v1/version", "/api/v1/config", "/api/v1/diagnostics", CONTROL_STOP):
+                return self._system(method, path)
             m = ROUTE.match(path)
             if not m:
                 return self._error(404, "NOT_FOUND", "unknown path")
@@ -148,6 +158,29 @@ def make_server(engine, host="127.0.0.1", port=8080, lock=None, info=None, statu
                 return self._error(409, "POLICY_DENIED",
                                    "Another remediation holds this workload.")
             self._send(200, detail(incident))
+
+        def _system(self, method, path):
+            if system is None:
+                return self._error(404, "NOT_AVAILABLE", "not available on this control plane")
+            if path == CONTROL_STOP:
+                if method != "POST":
+                    return self._error(404, "NOT_FOUND", "unknown path")
+                if self.headers.get(STOP_CONFIRM_HEADER) != STOP_CONFIRM_VALUE:
+                    return self._error(400, "CONFIRMATION_REQUIRED",
+                                       "stopping the control plane needs an explicit confirmation")
+                self._send(202, {"stopping": True, "pid": system.pid})
+                system.request_stop()          # the same graceful path as `aiops stop` (SIGTERM)
+                return
+            if method != "GET":
+                return self._error(404, "NOT_FOUND", "unknown path")
+            if path == "/api/v1/version":
+                return self._send(200, system.version())
+            if path == "/api/v1/config":
+                return self._send(200, system.config())
+            body = system.diagnostics()
+            if body is None:
+                return self._error(409, "BUSY", "a diagnostics run is already in progress")
+            self._send(200, body)
 
         def _error(self, status, code, message):
             self._send(status, {"error": {"code": code, "message": message,

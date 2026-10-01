@@ -66,6 +66,22 @@ pub fn request(
     connect: Duration,
     total: Duration,
 ) -> Result<Response, HttpError> {
+    request_with(ep, method, path, &[], connect, total)
+}
+
+/// As `request`, with extra fixed request headers (e.g. the server's confirmation header).
+pub fn request_with(
+    ep: &Endpoint,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    connect: Duration,
+    total: Duration,
+) -> Result<Response, HttpError> {
+    if headers.iter().any(|(n, v)| n.contains(['\r', '\n', ':']) || v.contains(['\r', '\n'])) {
+        return Err(HttpError::BadUrl("header contains a control character".into()));
+    }
+    let extra: String = headers.iter().map(|(n, v)| format!("{n}: {v}\r\n")).collect();
     let addrs: Vec<_> = (ep.host.as_str(), ep.port)
         .to_socket_addrs()
         .map_err(|e| HttpError::Io(e.to_string()))?
@@ -93,7 +109,7 @@ pub fn request(
     let length = if method == "POST" { "Content-Length: 0\r\n" } else { "" };
     let head = format!(
         "{method} {path} HTTP/1.1\r\nHost: {}:{}\r\nUser-Agent: aiops-tui/0.1\r\n\
-         Accept: application/json\r\nConnection: close\r\n{length}\r\n",
+         Accept: application/json\r\nConnection: close\r\n{length}{extra}\r\n",
         ep.host, ep.port
     );
     stream.write_all(head.as_bytes()).map_err(|e| HttpError::Io(e.to_string()))?;

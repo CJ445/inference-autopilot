@@ -13,10 +13,10 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::{Frame, Terminal};
 use serde_json::Value;
 
-use crate::app::{is_closed, App, Conn, Screen};
-use crate::model::{flag, num, text, Evidence, Incident, Obj, Watchdog};
+use crate::app::{is_closed, App, Conn, Remote, Screen, KEYMAP, SCREEN_ORDER};
+use crate::model::{flag, num, text, Check, Evidence, Incident, Obj, Watchdog};
 use crate::theme::{self, ACCENT, BORDER, CRITICAL, HEALTHY, TEXT_MUTED, WARNING};
-use crate::timeparse::clock_hms;
+use crate::timeparse::{clock_hms, parse_rfc3339};
 
 pub const MIN_W: u16 = 72;
 pub const MIN_H: u16 = 18;
@@ -166,10 +166,19 @@ pub fn render(f: &mut Frame, app: &App) {
         Screen::Incidents => incidents(f, body[1], app),
         Screen::Detail(id) => detail(f, body[1], app, id),
         Screen::Audit => audit(f, body[1], app),
+        Screen::ControlPlane => control_plane(f, body[1], app),
+        Screen::Settings => settings(f, body[1], app),
+        Screen::Diagnostics => diagnostics(f, body[1], app),
+        Screen::About => about(f, body[1], app),
+        Screen::Help => help(f, body[1], app),
     }
     footer(f, rows[2], app);
     if app.confirm.is_some() {
         confirm_modal(f, area, app);
+    } else if app.stop_confirm {
+        stop_modal(f, area);
+    } else if app.palette.is_some() {
+        palette_modal(f, area, app);
     } else if app.busy.is_some() {
         busy_modal(f, area, app);
     }
@@ -245,14 +254,15 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
 
 fn sidebar(f: &mut Frame, area: Rect, app: &App) {
     let w = area.width.saturating_sub(1) as usize; // the right border takes a column
-    let active = match &app.screen {
-        Screen::Dashboard => 0,
-        Screen::Incidents | Screen::Detail(_) => 1,
-        Screen::Audit => 2,
+    let here = match &app.screen {
+        Screen::Detail(_) => &Screen::Incidents,
+        other => other,
     };
+    let active = SCREEN_ORDER.iter().position(|s| s == here).unwrap_or(0);
     let open = app.rows().iter().filter(|i| !is_closed(&i.status)).count();
-    let mut lines = vec![blank()];
-    for (idx, label) in ["OVERVIEW", "INCIDENTS", "AUDIT"].into_iter().enumerate() {
+    let roomy = area.height >= 16;          // blank rows between items only when there is room
+    let item = |idx: usize, label: &str, upper: bool| {
+        let label = if upper { label.to_uppercase() } else { label.to_string() };
         let mut spans = if idx == active {
             vec![bold(" ▌ ", ACCENT), bold(label, ACCENT)]
         } else {
@@ -261,8 +271,28 @@ fn sidebar(f: &mut Frame, area: Rect, app: &App) {
         if idx == 1 && open > 0 {
             spans.push(bold(format!("  {open}"), WARNING)); // the open-incident count, nothing else
         }
-        lines.push(if idx == active { highlighted(spans, w) } else { Line::from(spans) });
+        if idx == active { highlighted(spans, w) } else { Line::from(spans) }
+    };
+    let group = |name: &str| Line::from(muted(format!(" {name}")));
+    let mut lines = Vec::new();
+    if roomy {
         lines.push(blank());
+    }
+    for (idx, label) in ["Overview", "Incidents", "Audit"].into_iter().enumerate() {
+        lines.push(item(idx, label, true));
+        if roomy {
+            lines.push(blank());
+        }
+    }
+    lines.push(hline(w + 1));
+    lines.push(group("SYSTEM"));
+    lines.push(item(3, "Control Plane", false));
+    if roomy {
+        lines.push(blank());
+    }
+    lines.push(group("OPERATOR"));
+    for (idx, label) in [(4, "Settings"), (5, "Diagnostics"), (6, "About"), (7, "Help")] {
+        lines.push(item(idx, label, false));
     }
     let block = Block::default().borders(Borders::RIGHT).border_style(fg(BORDER));
     f.render_widget(Paragraph::new(lines).block(block), area);
@@ -289,8 +319,14 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
             let mut hints = vec![
                 ("↑↓", "Navigate", true, 5), ("Enter", "Inspect", true, 6), ("A", "Approve", live, 7),
                 ("R", "Reject", live, 7), ("Esc", "Back", true, 3), ("S", "Refresh", true, 4),
-                ("Tab", "Screens", true, 2), ("Q", "Quit", true, 9),
+                ("Tab", "Screens", true, 2), ("Ctrl+P", "Commands", true, 8), ("?", "Help", true, 1),
+                ("Q", "Quit", true, 9),
             ];
+            match app.screen {
+                Screen::Diagnostics => hints.push(("D", "Run again", true, 7)),
+                Screen::ControlPlane => hints.push(("X", "Stop", true, 7)),
+                _ => {}
+            }
             let cost = |h: &(&str, &str, bool, u8)| h.0.chars().count() + h.1.chars().count() + 4;
             while 1 + hints.iter().map(cost).sum::<usize>() > area.width as usize && hints.len() > 1 {
                 let weakest = (0..hints.len()).min_by_key(|&n| hints[n].3).unwrap_or(0);
@@ -316,7 +352,7 @@ fn no_data(f: &mut Frame, area: Rect, app: &App) {
             lines.push(Line::from(bold(" CONTROL PLANE OFFLINE", CRITICAL)));
             lines.push(Line::from(format!(" {error}")));
             lines.push(Line::from(muted(format!(" Retrying {} (attempt {attempts})…", app.url))));
-            lines.push(Line::from(muted(" Start it with `aiops start`; this screen will recover by itself.")));
+            lines.push(Line::from(muted(" Start it with `aiops` (or `aiops start`); this screen will recover by itself.")));
         }
         _ => lines.push(Line::from(span(format!(" Connecting to {}…", app.url), WARNING))),
     }
@@ -896,4 +932,271 @@ fn busy_modal(f: &mut Frame, area: Rect, app: &App) {
         Line::from(muted(" The server stays authoritative; this screen follows its state.")),
     ];
     f.render_widget(Paragraph::new(lines).block(modal_block("In progress", WARNING)), rect);
+}
+
+// ---- system screens (read-only; every value is the server's) ----------------------------------
+
+fn show(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Null => "none".into(),
+        other => other.to_string(),
+    }
+}
+
+/// `Loading…` / `N/A: why` for a request that has not produced a value (never a default).
+fn pending<T>(remote: &Remote<T>, app: &App) -> Option<Line<'static>> {
+    match remote {
+        Remote::Ready(_) => None,
+        Remote::Idle => Some(Line::from(muted(" N/A"))),
+        Remote::Loading(since) => {
+            let secs = app.now.saturating_duration_since(*since).as_secs();
+            Some(Line::from(muted(format!(" Loading… ({secs}s)"))))
+        }
+        Remote::Failed(why) => Some(Line::from(span(format!(" N/A: {why}"), WARNING))),
+    }
+}
+
+fn uptime(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    match (s / 86_400, s / 3600 % 24, s / 60 % 60) {
+        (0, 0, m) => format!("{m}m {}s", s % 60),
+        (0, h, m) => format!("{h}h {m}m"),
+        (d, h, _) => format!("{d}d {h}h"),
+    }
+}
+
+fn control_plane(f: &mut Frame, area: Rect, app: &App) {
+    let w = area.width as usize;
+    let mut l = vec![blank(), rule("Control plane", None, w)];
+    let status = match &app.conn {
+        Conn::Online => bold("● ONLINE", HEALTHY),
+        Conn::Connecting => bold("… CONNECTING", WARNING),
+        Conn::Offline { .. } => bold("✗ OFFLINE", CRITICAL),
+    };
+    l.push(kv("Status", vec![status]));
+    l.push(kv("API", vec![plain(app.url.clone())]));
+    let snap = app.snapshot.as_ref();
+    let info = snap.map(|s| &s.status.info);
+    let started = info.and_then(|i| i.started_at.as_deref()).and_then(|at| {
+        let t = parse_rfc3339(at)?;
+        Some(format!("{}  (up {})", clock_hms(at), uptime(app.wall - t)))
+    });
+    let last_known = if app.is_stale() { "  (last known)" } else { "" };
+    for (label, value) in [
+        ("PID", info.and_then(|i| i.pid).map(|p| p.to_string())),
+        ("Started", started),
+        ("Profile", info.and_then(|i| i.profile.clone())),
+        ("Provider", info.and_then(|i| i.provider.clone())),
+        ("Workload", info.and_then(|i| i.workload.clone())),
+        ("Model", info.and_then(|i| i.model.clone())),
+    ] {
+        match value {
+            Some(v) => l.push(kv(label, vec![plain(v), muted(last_known)])),
+            None if label == "Model" => {}
+            None => l.push(kv(label, vec![muted("N/A")])),
+        }
+    }
+    let wd = snap.and_then(|s| s.status.watchdog.as_ref());
+    let (badge, detail) = watchdog_badge(wd);
+    let mut dog = vec![badge];
+    if let Some(d) = detail {
+        dog.push(span(format!(" ({d})"), CRITICAL));
+    }
+    l.push(kv("Watchdog", dog));
+    l.push(blank());
+    l.push(rule("Lifecycle", None, w));
+    l.push(split_row(vec![plain(" "), bold("[ X ] ", ACCENT), plain("Stop control plane")], vec![], w));
+    l.push(Line::from(muted(" Stopping ends the control plane and its watchdog; the managed workload is")));
+    l.push(Line::from(muted(" not touched. Start it again with `aiops` (or `aiops start`).")));
+    f.render_widget(Paragraph::new(l).scroll((app.scroll, 0)), area);
+}
+
+fn settings(f: &mut Frame, area: Rect, app: &App) {
+    let w = area.width as usize;
+    let ms = |v: Option<u64>| v.map_or("N/A".to_string(), |n| format!("{n} ms"));
+    let mut l = vec![
+        blank(),
+        rule("Client", Some(muted("this terminal UI")), w),
+        kv("API", vec![plain(app.url.clone())]),
+        kv("Refresh", vec![plain(ms(app.client.interval_ms)), muted("   --interval-ms")]),
+        kv("Timeout", vec![plain(ms(app.client.timeout_ms)), muted("   --timeout-ms")]),
+        Line::from(muted(" No other client preferences exist; the layout adapts to the terminal size.")),
+        blank(),
+        rule("Control plane configuration", Some(muted("read-only")), w),
+    ];
+    match pending(&app.config, app) {
+        Some(line) => l.push(line),
+        None => {
+            if let Remote::Ready(c) = &app.config {
+                l.push(kv("Source", vec![plain(c.source.clone())]));
+                l.push(kv("Status", vec![span("● Valid", HEALTHY), muted("  loaded and validated by the control plane")]));
+                l.push(kv("Profile", vec![plain(c.profile.clone())]));
+                l.push(kv("Provider", vec![plain(c.provider.clone())]));
+                for (name, values) in &c.sections {
+                    l.push(blank());
+                    l.push(Line::from(muted(format!(" [{name}]"))));
+                    for (k, v) in values {
+                        l.push(kv(&format!("  {k}"), vec![plain(show(v))]));
+                    }
+                }
+            }
+        }
+    }
+    l.push(blank());
+    l.push(Line::from(muted(" Edit the file, then `aiops stop` and `aiops` to apply. This screen never changes it.")));
+    f.render_widget(Paragraph::new(l).scroll((app.scroll, 0)), area);
+}
+
+fn check_chip(status: &str) -> Span<'static> {
+    match status {
+        "PASS" => span("● PASS", HEALTHY),
+        "WARN" => bold("● WARN", WARNING),
+        "FAIL" => bold("● FAIL", CRITICAL),
+        "NOT_APPLICABLE" => muted("○ NOT_APPLICABLE"),
+        other => muted(format!("? {other}")),
+    }
+}
+
+fn check_note(c: &Check) -> &'static str {
+    if c.status == "FAIL" && !c.blocking { "  (workload health; does not block start)" } else { "" }
+}
+
+fn diagnostics(f: &mut Frame, area: Rect, app: &App) {
+    let w = area.width as usize;
+    let note = match &app.diag {
+        Remote::Ready(d) => d.duration_seconds.map(|s| muted(format!("ran in {s:.1}s"))),
+        _ => None,
+    };
+    let mut l = vec![blank(), rule("Diagnostics", note, w)];
+    match pending(&app.diag, app) {
+        Some(line) => l.push(line),
+        None => {
+            let Remote::Ready(d) = &app.diag else { return };
+            for c in &d.results {
+                let room = w.saturating_sub(40).max(10);
+                let detail: String = if c.detail.chars().count() > room {
+                    format!("{}…", c.detail.chars().take(room - 1).collect::<String>())
+                } else {
+                    c.detail.clone()
+                };
+                l.push(Line::from(vec![
+                    plain(" "),
+                    check_chip(&c.status),
+                    plain(" ".repeat(18usize.saturating_sub(c.status.chars().count() + 2))),
+                    plain(format!("{:<17}", c.check)),
+                    muted(detail),
+                ]));
+            }
+            let count = |st: &str| d.results.iter().filter(|c| c.status == st).count();
+            l.push(blank());
+            l.push(Line::from(muted(format!(
+                " {} PASS · {} WARN · {} FAIL · {} NOT_APPLICABLE",
+                count("PASS"), count("WARN"), count("FAIL"), count("NOT_APPLICABLE")
+            ))));
+            for (title, status, color) in [("Failures", "FAIL", CRITICAL), ("Warnings", "WARN", WARNING)] {
+                let items: Vec<&Check> = d.results.iter().filter(|c| c.status == status).collect();
+                if items.is_empty() {
+                    continue;
+                }
+                l.push(blank());
+                l.push(rule(title, None, w));
+                for c in items {
+                    l.push(Line::from(vec![plain(" "), bold(c.check.clone(), color), muted(check_note(c))]));
+                    l.extend(wrapped(&c.detail, w));
+                }
+            }
+        }
+    }
+    f.render_widget(Paragraph::new(l).scroll((app.scroll, 0)), area);
+}
+
+fn about(f: &mut Frame, area: Rect, app: &App) {
+    let w = area.width as usize;
+    let mut l = vec![
+        blank(),
+        Line::from(vec![plain(" "), bold("AIOPS", ACCENT)]),
+        Line::from(muted(" Autonomous AIOps for LLM inference infrastructure")),
+        blank(),
+        rule("Operator UI", None, w),
+        kv("Version", vec![plain(env!("CARGO_PKG_VERSION"))]),
+        blank(),
+        rule("Control plane", None, w),
+    ];
+    match pending(&app.version, app) {
+        Some(line) => l.push(line),
+        None => {
+            if let Remote::Ready(v) = &app.version {
+                l.push(kv("Version", vec![plain(v.version.clone())]));
+                if let Some(rev) = &v.git_revision {
+                    l.push(kv("Git revision", vec![plain(rev.clone())]));
+                }
+                if let Some(p) = &v.python {
+                    l.push(kv("Python", vec![plain(p.clone())]));
+                }
+                if let Some(p) = &v.platform {
+                    l.push(kv("Platform", vec![plain(p.clone())]));
+                }
+            }
+        }
+    }
+    l.push(kv("Connection", vec![match &app.conn {
+        Conn::Online => span("● connected", HEALTHY),
+        Conn::Connecting => span("… connecting", WARNING),
+        Conn::Offline { .. } => span("✗ not connected", CRITICAL),
+    }]));
+    f.render_widget(Paragraph::new(l).scroll((app.scroll, 0)), area);
+}
+
+fn help(f: &mut Frame, area: Rect, app: &App) {
+    let w = area.width as usize;
+    let mut l = vec![blank(), rule("Keys", None, w)];
+    for (key, what) in KEYMAP {
+        l.push(Line::from(vec![plain(" "), bold(format!("{key:<9}"), theme::TEXT), muted(what)]));
+    }
+    l.push(blank());
+    l.push(rule("How it fits together", None, w));
+    l.push(Line::from(muted(" Workload remediation: incident → policy → your approval (A) → the server")));
+    l.push(Line::from(muted(" executes and verifies it. Stopping the control plane is separate (screen 4).")));
+    f.render_widget(Paragraph::new(l).scroll((app.scroll, 0)), area);
+}
+
+fn stop_modal(f: &mut Frame, area: Rect) {
+    let rect = centered(area, 58, 10);
+    f.render_widget(Clear, rect);
+    let lines = vec![
+        Line::from(bold(" Stop control plane?", WARNING)),
+        blank(),
+        Line::from(" The operator UI will disconnect."),
+        Line::from(muted(" The control plane and its watchdog stop.")),
+        Line::from(muted(" The managed workload is not touched.")),
+        blank(),
+        Line::from(span(" [Enter] Stop   [Esc] Cancel", ACCENT)),
+    ];
+    f.render_widget(Paragraph::new(lines).block(modal_block("Confirm", theme::BORDER_FOCUSED)), rect);
+}
+
+fn palette_modal(f: &mut Frame, area: Rect, app: &App) {
+    let Some(p) = &app.palette else { return };
+    let items = p.matches();
+    let h = (items.len().max(1) as u16 + 4).min(area.height.saturating_sub(2));
+    let w = 56.min(area.width.saturating_sub(4));
+    let rect = Rect { x: area.x + (area.width - w) / 2, y: area.y + 2, width: w, height: h };
+    f.render_widget(Clear, rect);
+    let inner_w = w.saturating_sub(2) as usize;
+    let query = if p.query.is_empty() {
+        vec![plain(" › "), muted("Search commands…")]
+    } else {
+        vec![plain(" › "), plain(p.query.clone()), span("▏", ACCENT)]
+    };
+    let mut lines = vec![Line::from(query), hline(inner_w + 2)];
+    if items.is_empty() {
+        lines.push(Line::from(muted("   No matching command")));
+    }
+    for (n, cmd) in items.iter().enumerate() {
+        let sel = n == p.selected;
+        let spans = vec![if sel { bold(" › ", ACCENT) } else { plain("   ") }, plain(cmd.label())];
+        lines.push(if sel { highlighted(spans, inner_w) } else { Line::from(spans) });
+    }
+    f.render_widget(Paragraph::new(lines).block(modal_block("Commands", theme::BORDER_FOCUSED)), rect);
 }

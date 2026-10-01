@@ -138,7 +138,9 @@ fn tab_and_number_keys_switch_screens_and_audit_is_only_polled_on_its_screen() {
     assert!(matches!(app.screen, Screen::Incidents));
     app.handle_key(code(KeyCode::Tab));
     assert!(matches!(app.screen, Screen::Audit) && app.interest().want_audit);
-    app.handle_key(code(KeyCode::Tab));
+    for _ in 0..6 {                       // Control Plane, Settings, Diagnostics, About, Help, Overview
+        app.handle_key(code(KeyCode::Tab));
+    }
     assert!(matches!(app.screen, Screen::Dashboard) && !app.interest().want_audit);
     app.handle_key(key('2'));
     assert!(matches!(app.screen, Screen::Incidents));

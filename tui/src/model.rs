@@ -36,6 +36,8 @@ pub struct IncidentIds {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Info {
     #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
     pub profile: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
@@ -193,4 +195,54 @@ pub fn flag(o: &Obj, key: &str) -> Option<bool> {
 
 pub fn text(o: &Obj, key: &str) -> Option<String> {
     o.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+/// `GET /api/v1/version`: what the control plane reports about itself. Nothing here is computed
+/// by the TUI.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VersionInfo {
+    pub version: String,
+    #[serde(default)]
+    pub git_revision: Option<String>,
+    #[serde(default)]
+    pub python: Option<String>,
+    #[serde(default)]
+    pub platform: Option<String>,
+}
+
+/// `GET /api/v1/config`: the active, validated, non-secret configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConfigInfo {
+    pub source: String,
+    pub profile: String,
+    pub provider: String,
+    #[serde(default)]
+    pub sections: BTreeMap<String, Obj>,
+}
+
+/// `GET /api/v1/diagnostics`: the doctor's results, statuses exactly as the server names them.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Diagnostics {
+    pub results: Vec<Check>,
+    #[serde(default)]
+    pub ran_at: Option<String>,
+    #[serde(default)]
+    pub duration_seconds: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Check {
+    pub check: String,
+    pub status: String,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default)]
+    pub blocking: bool,
+}
+
+/// `POST /api/v1/control/stop` acknowledgement.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StopAck {
+    #[serde(default)]
+    pub stopping: bool,
 }

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inference-autopilot"
+dynamic = ["version"]
+description = "Autonomous AIOps for LLM inference infrastructure: control plane (Python) with an operator TUI (Rust)"
+requires-python = ">=3.11"          # tomllib
+dependencies = []                   # standard library only, by design
+
+[project.scripts]
+aiops = "aiops.cli:main"
+
+[tool.setuptools]
+packages = ["aiops"]
+
+[tool.setuptools.dynamic]
+version = {attr = "aiops.__version__"}

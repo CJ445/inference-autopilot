@@ -11,13 +11,15 @@ from aiops import lifecycle
 from aiops.doctor import FAIL, format_results, run_doctor
 from aiops.profile import ProfileError, load_profile
 
-USAGE = ("usage: aiops {start|stop|status|doctor} [--config PATH] [--json]\n"
+USAGE = ("usage: aiops [--config PATH]   (no command: open the operator UI, starting the control\n"
+         "                                  plane first if it is not running)\n"
+         "       aiops {start|stop|status|doctor} [--config PATH] [--json]\n"
          "       aiops tui [--config PATH] [--url URL] [-- TUI ARGS]   (the operator terminal UI)\n"
          "       aiops serve ...   (unmanaged legacy)")
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(prog="aiops", usage=USAGE)
+    parser = argparse.ArgumentParser(prog="aiops", usage=USAGE.removeprefix("usage: "))
     sub = parser.add_subparsers(dest="command", required=True)
     for name, help_ in (("start", "run the control plane in the foreground (explicit; no daemon)"),
                         ("stop", "stop the running control plane (safe if already stopped)"),
@@ -98,9 +100,9 @@ def main(argv=None):
     if argv[:1] == ["serve"]:
         from aiops.serve import main as serve_main
         return serve_main(argv[1:])
-    if not argv:
-        print(USAGE)
-        return 2
+    if not argv or argv[0] == "--config":
+        from aiops.launcher import main as launcher_main
+        return launcher_main(argv)
     args = build_parser().parse_args(argv)
     if args.command == "start":
         stop_event = threading.Event()

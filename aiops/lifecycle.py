@@ -26,6 +26,7 @@ from aiops.prometheus import TelemetryError
 from aiops.runtime import build_engine
 from aiops.serve import Service
 from aiops.store import AuditTampered, Store, StoreUnavailable
+from aiops.system import System
 from aiops.vllm import VllmClient
 from aiops import watchdog as watchdog_module
 from aiops.watchdog import boot_id, proc_start
@@ -240,16 +241,20 @@ def start(config_path, stop_event, out=print, doctor=run_doctor, build=build_eng
             "workload": profile["workload"]["name"], "pid": os.getpid()}
     if profile["workload"].get("model"):
         info["model"] = profile["workload"]["model"]
+    # The API's confirmed stop is this very event: the one `aiops stop` sets via SIGTERM.
+    system = System(profile, request_stop=stop_event.set, doctor=doctor)
     try:
         service = service_cls(engine, port=cp["port"], interval=cp["interval"], info=info,
-                              status_extra=lambda: {"watchdog": _watchdog_status(profile)})
+                              status_extra=lambda: {"watchdog": _watchdog_status(profile)},
+                              system=system)
     except OSError as e:
         out(f"refusing to start: cannot bind 127.0.0.1:{cp['port']}: {e} (is the port in use?)")
         return 1
 
+    started_at = datetime.now(timezone.utc).isoformat()
+    info["started_at"] = started_at
     state = {**info, "proc_start": proc_start(os.getpid()), "port": cp["port"],
-             "db": cp["db"], "config": profile["config_path"],
-             "started_at": datetime.now(timezone.utc).isoformat()}
+             "db": cp["db"], "config": profile["config_path"]}
     if not _claim(state_path, state):
         service.server.server_close()
         out("already running (another control plane claimed the state file first)")

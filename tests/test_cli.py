@@ -23,9 +23,15 @@ def valid_config(tmp_path, workload=None):
     return write(tmp_path, text)
 
 
-def test_a_command_is_required():
-    r = aiops()
-    assert r.returncode != 0 and "usage" in (r.stdout + r.stderr).lower()
+def test_bare_aiops_opens_the_ui_so_without_a_terminal_it_refuses_instead_of_guessing():
+    r = aiops()                                  # captured output: not a terminal
+    assert r.returncode == 2 and "not a terminal" in r.stdout and "aiops start" in r.stdout
+
+
+def test_help_lists_the_commands_and_the_bare_form():
+    r = aiops("--help")
+    assert r.returncode == 0 and "start" in r.stdout and "no command" in r.stdout
+    assert "usage: usage:" not in r.stdout
 
 
 def test_unknown_commands_are_rejected():
@@ -150,4 +156,4 @@ def test_tui_never_creates_state_or_touches_the_database(tmp_path):
 
 
 def test_the_usage_mentions_the_tui():
-    assert "tui" in aiops().stdout.lower()
+    assert "tui" in aiops("--help").stdout.lower()

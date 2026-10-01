@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aiops_tui::api::{ApiError, Client};
-use aiops_tui::app::{ActionKind, App, Effect, Interest, Msg, Screen, Snapshot};
+use aiops_tui::app::{ActionKind, App, ClientInfo, Effect, Interest, Loaded, Msg, Screen, Snapshot};
 use aiops_tui::ui;
 use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
@@ -25,11 +25,12 @@ const DEFAULT_URL: &str = "http://127.0.0.1:8080";
 const AUDIT_LIMIT: u32 = 200;
 /// An approval returns only once remediation AND verification finish (up to minutes).
 const ACTION_TIMEOUT: Duration = Duration::from_secs(300);
+const DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(120);
 
 const HELP: &str = "aiops-tui: operator interface for the Inference Autopilot control plane
 
 USAGE: aiops-tui [--url URL] [--interval-ms N] [--timeout-ms N]
-       aiops-tui --once [--screen dashboard|incidents|audit|detail:ID] [--width N] [--height N]
+       aiops-tui --once [--screen dashboard|incidents|audit|control|settings|diagnostics|about|help|detail:ID] [--width N] [--height N]
 
   --url URL         control-plane API (loopback http only)   [default http://127.0.0.1:8080]
   --interval-ms N   refresh interval, 250..10000             [default 750]
@@ -37,8 +38,8 @@ USAGE: aiops-tui [--url URL] [--interval-ms N] [--timeout-ms N]
   --once            print one frame of the REAL current state as text and exit
                     (exit status 3 if the control plane is unreachable)
 
-KEYS  Up/Down navigate   Enter inspect   A approve   R reject   Esc back
-      S refresh   Tab or 1/2/3 switch screens   Q or Ctrl+C quit
+KEYS  Up/Down navigate   Enter inspect   A approve   R reject   Esc back   S refresh
+      Tab or 1-7 switch screens   Ctrl+P command palette   ? help   Q or Ctrl+C quit
 ";
 
 struct Opts {
@@ -112,6 +113,14 @@ fn fetch(client: &Client, want: &Interest) -> Result<Snapshot, ApiError> {
     Ok(snapshot)
 }
 
+/// A one-shot, read-only request on its own thread (the poller is never blocked by it).
+fn spawn_call(client: &Client, total: Duration, tx: Sender<Msg>, call: fn(&Client) -> Loaded) {
+    let client = client.clone().with_timeouts(Duration::from_secs(1), total);
+    thread::spawn(move || {
+        let _ = tx.send(Msg::Loaded(call(&client)));
+    });
+}
+
 fn spawn_poller(
     client: Client,
     interval: Duration,
@@ -157,6 +166,11 @@ fn once(o: &Opts) -> ExitCode {
         "dashboard" => {}
         "incidents" => app.screen = Screen::Incidents,
         "audit" => app.screen = Screen::Audit,
+        "control" => app.screen = Screen::ControlPlane,
+        "settings" => app.screen = Screen::Settings,
+        "diagnostics" => app.screen = Screen::Diagnostics,
+        "about" => app.screen = Screen::About,
+        "help" => app.screen = Screen::Help,
         s if s.starts_with("detail:") => app.screen = Screen::Detail(s["detail:".len()..].to_string()),
         other => {
             eprintln!("aiops-tui: unknown screen {other:?}");
@@ -166,6 +180,22 @@ fn once(o: &Opts) -> ExitCode {
     let result = fetch(&client, &app.interest());
     let online = result.is_ok();
     app.apply(Msg::Poll(result));
+    app.client = ClientInfo {
+        interval_ms: Some(o.interval.as_millis() as u64),
+        timeout_ms: Some(o.timeout.as_millis() as u64),
+    };
+    if online {
+        // the same read-only requests the interactive screens make, answered synchronously
+        match app.screen {
+            Screen::Settings => app.apply(Msg::Loaded(Loaded::Config(client.config()))),
+            Screen::About => app.apply(Msg::Loaded(Loaded::Version(client.version()))),
+            Screen::Diagnostics => {
+                let slow = client.clone().with_timeouts(Duration::from_secs(1), DIAGNOSTICS_TIMEOUT);
+                app.apply(Msg::Loaded(Loaded::Diagnostics(slow.diagnostics())));
+            }
+            _ => {}
+        }
+    }
     println!("{}", ui::render_to_string(&app, o.width, o.height));
     if online { ExitCode::SUCCESS } else { ExitCode::from(3) }
 }
@@ -194,6 +224,10 @@ fn interactive(o: &Opts) -> Result<(), String> {
     spawn_poller(client.clone(), o.interval, interest.clone(), tx.clone(), wake_rx);
 
     let mut app = App::new(o.url.clone());
+    app.client = ClientInfo {
+        interval_ms: Some(o.interval.as_millis() as u64),
+        timeout_ms: Some(o.timeout.as_millis() as u64),
+    };
     let outcome = (|| -> io::Result<()> {
         'ui: loop {
             app.now = Instant::now();
@@ -213,6 +247,20 @@ fn interactive(o: &Opts) -> Result<(), String> {
                                 Effect::Quit => break 'ui,
                                 Effect::RefreshNow => {
                                     let _ = wake_tx.send(());
+                                }
+                                Effect::LoadConfig => {
+                                    spawn_call(&client, Duration::from_secs(5), tx.clone(), |c| Loaded::Config(c.config()))
+                                }
+                                Effect::LoadVersion => {
+                                    spawn_call(&client, Duration::from_secs(5), tx.clone(), |c| Loaded::Version(c.version()))
+                                }
+                                // the doctor reads real infrastructure: it can take a while
+                                Effect::RunDiagnostics => spawn_call(&client, DIAGNOSTICS_TIMEOUT, tx.clone(), |c| {
+                                    Loaded::Diagnostics(c.diagnostics())
+                                }),
+                                // sent exactly once per confirmation; there is no retry anywhere
+                                Effect::StopControlPlane => {
+                                    spawn_call(&client, Duration::from_secs(10), tx.clone(), |c| Loaded::Stop(c.stop_control_plane()))
                                 }
                                 Effect::Approve(id) => spawn_action(&client, ActionKind::Approve, id, tx.clone()),
                                 Effect::Reject(id) => spawn_action(&client, ActionKind::Reject, id, tx.clone()),

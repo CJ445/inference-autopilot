@@ -26,6 +26,7 @@ from test_engine import CONFIG, World
 
 from aiops.engine import Engine
 from aiops.serve import Service
+from aiops.system import System
 
 ROOT = Path(__file__).parent.parent
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][A-Za-z0-9]|\x1b[=>]")
@@ -61,7 +62,17 @@ class ControlPlane:
         self.service = None
 
     def start(self):
-        self.service = Service(self.engine, port=self.port, interval=0.2,
+        self.stop_requested = threading.Event()
+        self.system = System(
+            {"config_path": "/etc/aiops/aiops.toml", "name": "stand-in", "provider": "kubernetes",
+             "workload": {"name": "vllm-0"}, "control_plane": {"port": self.port}},
+            self.stop_requested.set,
+            doctor=lambda p: [
+                {"check": "python", "status": "PASS", "detail": "3.13.5", "blocking": True},
+                {"check": "gpu_headroom", "status": "WARN", "detail": "only 900 MiB free",
+                 "blocking": False},
+                {"check": "kubectl", "status": "NOT_APPLICABLE", "detail": "n/a", "blocking": False}])
+        self.service = Service(self.engine, port=self.port, interval=0.2, system=self.system,
                                info={"profile": "stand-in", "provider": "kubernetes",
                                      "workload": "vllm-0", "pid": os.getpid()},
                                status_extra=lambda: {"watchdog": {
@@ -422,3 +433,55 @@ def test_bad_arguments_are_rejected_with_usage(tui_bin):
         r = subprocess.run([tui_bin, *args], capture_output=True, text=True, timeout=10)
         assert r.returncode == 1 and "USAGE" in r.stderr, args
     assert subprocess.run([tui_bin, "--help"], capture_output=True, text=True).returncode == 0
+
+
+# --- the operator application: palette, system screens, stop ------------------------------------------
+
+def test_the_command_palette_opens_filters_and_navigates(term, cp):
+    t = term(cp.url)
+    assert t.wait_screen("inc_001")
+    t.send(b"\x10")                                  # Ctrl+P
+    assert t.wait_screen("Search commands")
+    t.send(b"about")
+    assert t.wait_screen("Open About") and not t.screen().count("Open Overview")
+    t.send(b"\r")
+    assert t.wait_screen("Autonomous AIOps for LLM inference")
+    assert t.wait_screen("Python")                    # the control plane's real /version answer
+    t.send(b"q")
+    assert t.proc.wait(timeout=10) == 0
+
+
+def test_settings_show_the_servers_real_active_configuration(term, cp):
+    t = term(cp.url)
+    assert t.wait_screen("inc_001")
+    t.send(b"5")
+    assert t.wait_screen("/etc/aiops/aiops.toml") and t.wait_screen("● Valid")
+    assert t.wait_screen("[workload]") and t.wait_screen("vllm-0")
+
+
+def test_diagnostics_show_the_doctors_results_from_the_server(term, cp):
+    t = term(cp.url)
+    assert t.wait_screen("inc_001")
+    t.send(b"6")
+    for needle in ["● PASS", "● WARN", "○ NOT_APPLICABLE", "3.13.5", "only 900 MiB free", "Warnings"]:
+        assert t.wait_screen(needle), needle
+
+
+def test_stopping_the_control_plane_from_the_tui_needs_confirmation_and_asks_the_server_once(term, cp):
+    t = term(cp.url)
+    assert t.wait_screen("inc_001")
+    t.send(b"4")
+    assert t.wait_screen("[ X ] Stop control plane")
+    t.send(b"x")
+    assert t.wait_screen("Stop control plane?")
+    time.sleep(0.8)
+    assert not cp.stop_requested.is_set()              # the dialog alone does nothing
+    t.send(b"\x1b")
+    time.sleep(0.8)
+    assert not cp.stop_requested.is_set()              # Esc cancels
+    t.send(b"x")
+    assert t.wait_screen("Stop control plane?")
+    t.send(b"\r")
+    assert cp.stop_requested.wait(10)                  # the SERVER was asked, through its API
+    assert t.wait_screen("stop requested")
+    assert cp.world.restarts == 0                      # no workload was touched

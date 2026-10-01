@@ -6,8 +6,10 @@ use std::time::Duration;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
-use crate::http::{request, Endpoint, HttpError};
-use crate::model::{Audit, Incident, IncidentList, Status};
+use crate::http::{request_with, Endpoint, HttpError};
+use crate::model::{
+    Audit, ConfigInfo, Diagnostics, Incident, IncidentList, Status, StopAck, VersionInfo,
+};
 
 pub const AUDIT_MAX_LIMIT: u32 = 1000;
 
@@ -89,7 +91,16 @@ impl Client {
     }
 
     fn call<T: DeserializeOwned>(&self, method: &str, path: &str) -> Result<T, ApiError> {
-        let response = request(&self.endpoint, method, path, self.connect, self.total)?;
+        self.call_with(method, path, &[])
+    }
+
+    fn call_with<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<T, ApiError> {
+        let response = request_with(&self.endpoint, method, path, headers, self.connect, self.total)?;
         if !(200..300).contains(&response.status) {
             return Err(match serde_json::from_str::<ErrorBody>(&response.body) {
                 Ok(e) => ApiError::Server {
@@ -141,5 +152,26 @@ impl Client {
 
     pub fn reject(&self, id: &str) -> Result<Incident, ApiError> {
         self.call("POST", &format!("/api/v1/incidents/{}/remediation/reject", Self::checked(id)?))
+    }
+
+    // ---- read-only system endpoints (the server runs the doctor; the TUI only asks) ------------
+
+    pub fn version(&self) -> Result<VersionInfo, ApiError> {
+        self.call("GET", "/api/v1/version")
+    }
+
+    pub fn config(&self) -> Result<ConfigInfo, ApiError> {
+        self.call("GET", "/api/v1/config")
+    }
+
+    pub fn diagnostics(&self) -> Result<Diagnostics, ApiError> {
+        self.call("GET", "/api/v1/diagnostics")
+    }
+
+    /// Asks the SERVER to shut itself down gracefully, exactly as `aiops stop` would. It is the
+    /// control plane's lifecycle only: it names no workload and has no path to remediation. The
+    /// header is the server's explicit-confirmation marker (a web page cannot send it).
+    pub fn stop_control_plane(&self) -> Result<StopAck, ApiError> {
+        self.call_with("POST", "/api/v1/control/stop", &[("X-Aiops-Confirm", "stop-control-plane")])
     }
 }

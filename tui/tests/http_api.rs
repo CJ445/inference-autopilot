@@ -32,6 +32,7 @@ fn http(status: u16, body: &str) -> Vec<u8> {
 struct Fake {
     port: u16,
     requests: Arc<Mutex<Vec<String>>>,
+    heads: Arc<Mutex<Vec<String>>>,
 }
 
 impl Fake {
@@ -43,6 +44,10 @@ impl Fake {
     fn requests(&self) -> Vec<String> {
         self.requests.lock().unwrap().clone()
     }
+    /// The full request heads (request line and headers), for header assertions.
+    fn heads(&self) -> Vec<String> {
+        self.heads.lock().unwrap().clone()
+    }
 }
 
 /// One connection per scripted reply; records each request line.
@@ -51,6 +56,8 @@ fn fake(replies: Vec<Reply>) -> Fake {
     let port = listener.local_addr().unwrap().port();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let seen = requests.clone();
+    let heads = Arc::new(Mutex::new(Vec::new()));
+    let seen_heads = heads.clone();
     thread::spawn(move || {
         for reply in replies {
             let Ok((mut conn, _)) = listener.accept() else { return };
@@ -64,6 +71,7 @@ fn fake(replies: Vec<Reply>) -> Fake {
             }
             let line = String::from_utf8_lossy(&head).lines().next().unwrap_or("").to_string();
             seen.lock().unwrap().push(line);
+            seen_heads.lock().unwrap().push(String::from_utf8_lossy(&head).into_owned());
             match reply {
                 Reply::Raw(bytes) => {
                     let _ = conn.write_all(&bytes);
@@ -76,7 +84,7 @@ fn fake(replies: Vec<Reply>) -> Fake {
             }
         }
     });
-    Fake { port, requests }
+    Fake { port, requests, heads }
 }
 
 #[test]
@@ -292,4 +300,69 @@ fn the_audit_limit_is_bounded() {
     assert!(matches!(c.audit(0), Err(ApiError::Invalid(_))));
     assert!(matches!(c.audit(100_000), Err(ApiError::Invalid(_))));
     assert!(c.audit(1000).is_ok());
+}
+
+// --- the read-only system endpoints and the one confirmed stop ---------------------------------------
+
+#[test]
+fn version_config_and_diagnostics_are_plain_gets_and_parse() {
+    let f = fake(vec![
+        Reply::Raw(http(200, r#"{"version": "0.1.0", "git_revision": null, "python": "3.13.5", "platform": "Linux x86_64"}"#)),
+        Reply::Raw(http(200, r#"{"source": "/x/aiops.toml", "profile": "docker-real-gpu", "provider": "docker",
+                               "sections": {"workload": {"name": "vllm"}}}"#)),
+        Reply::Raw(http(200, r#"{"ran_at": "t", "duration_seconds": 1.5, "results": [
+                               {"check": "python", "status": "PASS", "detail": "ok", "blocking": true},
+                               {"check": "kubectl", "status": "NOT_APPLICABLE", "detail": "n/a", "blocking": false}]}"#)),
+    ]);
+    let c = f.client();
+    let v = c.version().unwrap();
+    assert_eq!((v.version.as_str(), v.git_revision), ("0.1.0", None));
+    let cfg = c.config().unwrap();
+    assert_eq!(cfg.profile, "docker-real-gpu");
+    assert_eq!(cfg.sections["workload"]["name"], "vllm");
+    let d = c.diagnostics().unwrap();
+    assert_eq!(d.results.len(), 2);
+    assert_eq!(d.results[1].status, "NOT_APPLICABLE");   // the server's word, untouched
+    assert_eq!(
+        f.requests(),
+        vec!["GET /api/v1/version HTTP/1.1", "GET /api/v1/config HTTP/1.1", "GET /api/v1/diagnostics HTTP/1.1"]
+    );
+}
+
+#[test]
+fn stop_is_one_post_to_the_control_endpoint_with_the_confirmation_header() {
+    let f = fake(vec![Reply::Raw(http(202, r#"{"stopping": true, "pid": 4242}"#))]);
+    assert!(f.client().stop_control_plane().unwrap().stopping);
+    assert_eq!(f.requests(), vec!["POST /api/v1/control/stop HTTP/1.1"]);
+    assert!(f.heads()[0].to_lowercase().contains("x-aiops-confirm: stop-control-plane"));
+}
+
+#[test]
+fn a_stop_that_times_out_is_sent_once_and_never_retried() {
+    let f = fake(vec![Reply::After(Duration::from_millis(1500), http(202, r#"{"stopping": true}"#))]);
+    assert_eq!(f.client().stop_control_plane().unwrap_err(), ApiError::Timeout);
+    thread::sleep(Duration::from_millis(1800));
+    assert_eq!(f.requests().len(), 1, "no automatic retry of a mutation");
+}
+
+#[test]
+fn a_refused_stop_surfaces_the_servers_error_contract() {
+    let f = fake(vec![Reply::Raw(http(
+        400,
+        r#"{"error": {"code": "CONFIRMATION_REQUIRED", "message": "needs confirmation", "request_id": "r"}}"#,
+    ))]);
+    match f.client().stop_control_plane() {
+        Err(ApiError::Server { status: 400, code, .. }) => assert_eq!(code, "CONFIRMATION_REQUIRED"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn headers_with_control_characters_are_refused_before_sending() {
+    use aiops_tui::http::{request_with, Endpoint};
+    let f = fake(vec![]);
+    let ep = Endpoint::parse(&format!("http://127.0.0.1:{}", f.port)).unwrap();
+    let r = request_with(&ep, "GET", "/x", &[("X-A", "b\r\nX-Injected: 1")], Duration::from_millis(200), Duration::from_millis(200));
+    assert!(r.is_err());
+    assert!(f.requests().is_empty());
 }
