@@ -4298,9 +4298,9 @@ This section must be maintained during development.
 ```text
 ## Phase 0 — Feasibility
 - [x] Kubernetes runtime validated (kind, CPU; resource overhead not yet measured, OQ-001)
-- [ ] vLLM validated
-- [ ] GPU telemetry validated
-- [ ] vLLM metrics validated
+- [x] vLLM validated (v0.10.0, CUDA 12.8.1 image, plain Docker, facebook/opt-125m at 35% VRAM; healthy in 31s, real inference in 58 ms; v0.30.0 is incompatible with this driver, ADR-017)
+- [x] GPU telemetry validated (nvidia-smi: UUID, memory used/total, temperature, utilization, per-process memory whose PID is in the container's `docker top`; DCGM not tried)
+- [x] vLLM metrics validated (73 families recorded for v0.10.0 ONLY, fixture in tests/fixtures; vLLM exposes NO error/allocation-failure/OOM/GPU-memory metric; request_success_total is per finished_reason and must be summed)
 - [ ] GPU fault injection validated
 - [x] remediation validated (restart_pod on a real kind cluster, verified from observed state)
 - [ ] TUI prototype validated
@@ -4314,7 +4314,7 @@ This section must be maintained during development.
 
 ## Phase 2 — Sandbox
 - [x] Kubernetes (kind, created and deleted by the integration test)
-- [ ] inference (only a CPU stand-in exists; real vLLM not yet run)
+- [x] inference (real vLLM in plain Docker on the GPU; NOT Kubernetes, GPU-in-kind still unproven)
 - [x] demo workload (CPU stand-in StatefulSet emitting vLLM-shaped metrics)
 
 ## Phase 3 — Observability
@@ -4396,6 +4396,7 @@ This section must be maintained during development.
 | ADR-014 | 2026-10-01 | GPU pressure fault caps the child's own CUDA allocator (`set_per_process_memory_fraction`) and allocates until PyTorch raises OutOfMemoryError, under the watchdog | Real application-level OOM (§40) whose bound is enforced by the allocator itself, with the watchdog as the second layer | Answers OQ-004 for this machine only (3 runs); limits 4 GiB / 60 s / 85% VRAM / 80 C |
 | ADR-015 | 2026-10-01 | `python -m aiops serve` runs the tick loop and the API in one process; `--context` is mandatory, there is no `--host`; if SQLite is unavailable, approve/reject/incident-creation roll back and raise (API: 503 DEPENDENCY_ERROR) | §86 fail-closed; never act on whatever cluster happens to be current; API stays loopback-only | Does not replace the PRD's `aiops start/stop` lifecycle (Phase 1), which is still unbuilt |
 | ADR-016 | 2026-10-01 | Narrow `WorkloadProvider` (get_workload, restart_workload); the engine reasons about `restart_workload`. `KubernetesProvider` (kubectl) and `DockerProvider` (fixed-argv docker CLI, project labels) implement it. Docker is the first REAL-GPU validation backend; Kubernetes stays the primary control surface | GPU-in-kind is unproven and an 8.7 GB vLLM image makes it a poor first step; the Docker socket is root-equivalent, so the provider exposes only get/restart of labeled containers (re-checked after inspect), fails closed on zero/ambiguous/mismatched identity, and treats `ContainerID:StartedAt` as lifecycle identity because `docker restart` keeps the ID (verified on the real daemon) | Renamed restart_pod -> restart_workload everywhere; no Docker SDK dependency (same pattern as kubectl); no socket proxy in the MVP; GPU-in-kind deferred |
+| ADR-017 | 2026-10-01 | The vLLM image's CUDA version must be compatible with the HOST driver; `vllm/vllm-openai:v0.30.0` (CUDA 13.0.2) was tried first and is unusable here, so the real-GPU path pins `v0.10.0` (CUDA 12.8.1) | Measured: driver 570.207 supports CUDA <= 12.8; the CUDA 13 image failed in cudaGetDeviceCount() with Error 804 (forward compatibility attempted on non-supported HW, which NVIDIA allows only on datacenter GPUs). No cu128 tag exists; v0.10.0 and v0.11.0 are the CUDA 12.8.1 builds | `doctor` (§83) should compare driver CUDA against the image's CUDA_VERSION before starting; image sizes: v0.30.0 8.73 GB compressed / 21.6 GB on disk, v0.30.0-cu129 13.68 GB, v0.10.0 10.86 GB |
 ```
 
 ---
@@ -4409,7 +4410,7 @@ These must be resolved through feasibility spikes rather than assumptions.
 |---|---|---|
 | OQ-001 | Which Kubernetes runtime has the lowest acceptable resource overhead? | Medium |
 | OQ-002 | Which small inference model is appropriate for the target GPU? | Medium |
-| OQ-003 | Which vLLM metrics are stable enough for the first release? | Medium |
+| OQ-003 | Which vLLM metrics are stable enough for the first release? | Medium (v0.10.0 recorded; stability across versions untested; no failure/GPU-memory metric exists, so GPU memory must come from NVML) |
 | OQ-004 | What is the safest reproducible real GPU allocation-failure scenario? | High (partially answered by ADR-014: stressor only, no vLLM co-residency yet) |
 | OQ-005 | Which telemetry should be mandatory versus optional? | Medium |
 | OQ-006 | Should OTel traces be MVP or Phase 2? | Low |
