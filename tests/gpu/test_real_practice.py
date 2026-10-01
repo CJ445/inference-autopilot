@@ -40,8 +40,10 @@ def test_practice_on_the_real_machine_touches_nothing_real(tmp_path, tui_bin):
     with ControlPlane(tmp_path) as c:
         t = Pty([AIOPS, "--config", str(c.cfg)], env_for(tui_bin), rows=40, cols=132)
         try:
-            assert t.wait_screen("○ NO WORKLOAD", timeout=120)         # the real, empty system
-            assert t.wait_screen("Press P to practice an incident")
+            assert t.wait_screen("No workload connected", timeout=120)  # the real, empty system
+            assert t.wait_screen("P  Practice an incident")
+            t.send(b"d")                                               # the technical view for the rest
+            assert t.wait_screen("○ NO WORKLOAD") and t.wait_screen("Press P to practice an incident")
             real = http(c.port, "/api/v1/status")
             assert real["mode"] == "REAL" and real["workload"]["state"] == "absent"
             pid = lifecycle.read_state(c.state)["pid"]

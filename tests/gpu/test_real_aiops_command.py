@@ -41,6 +41,8 @@ def test_bare_aiops_starts_attaches_and_stops_the_real_control_plane(vllm, tmp_p
         t = Pty([AIOPS, "--config", str(c.cfg)], env_for(tui_bin), rows=52, cols=132)
         try:
             assert t.wait_screen("● CONTROL ONLINE", timeout=120)
+            assert t.wait_screen("Everything is working", timeout=60)   # plain by default
+            t.send(b"d")                                                # then the technical view
             for needle in ["INFERENCE AUTOPILOT", "docker-real-gpu", uuid[:12], "Probe ✓",
                            "Metrics ✓", "● ARMED", "Identity ✓", "AUDIT ✓ VERIFIED",
                            f"vLLM · {MODEL}"]:

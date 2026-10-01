@@ -159,3 +159,44 @@ not offer faults.
 **Known limit.** After the lease expires the workload recovers and the incident the hang produced
 stays pending (the ADR-019 gap); approving it would restart a healthy workload, which the operator
 can see. The default duration is long enough (120 s) to review and approve.
+
+## D-13: Plain language by default, technical detail one key away (Phase 5)
+
+*Brief:* the TUI should be understandable to a human operator first and an engineer second; move the
+technical information behind `D`; consolidate to four areas; never make a stronger claim than the
+telemetry supports.
+
+**Layering, not removal.** The current technical views are kept exactly as they are and become the
+"details" view (`D`, a global toggle on Overview, Incidents, the incident page and Activity). The new
+default views are written from the same model data through one module of phrase mappings
+(`tui/src/plain.rs`) so wording lives in one place and is unit-tested. An unknown category, state or
+event falls back to its raw name, never to an invented sentence.
+
+**Where I depart from the brief's wording, and why** (the brief's own rule: no claim stronger than the
+evidence):
+* `GPU_MEMORY_PRESSURE` reads "GPU memory is above its limit", not "The GPU is running out of memory":
+  the detector fires on used memory above a configured threshold, which is not the same claim.
+* "Answered N test requests in a row" takes N from the server. The incident detail now carries
+  `verification.required_completions` (the engine's configured `stable_probes`, absent when the engine
+  has none); without it the page says "the model answers again" and never a number the TUI made up.
+* The Activity view shows no times: audit events carry none (the hash chain stores event, data, prev,
+  hash). The incident page's timeline, which does have times, keeps them.
+* `INFERENCE_UNRESPONSIVE` is explained as "The model stopped responding to test requests", which is
+  what the detector observed (a failed inference probe), and the evidence rows say "did not complete in
+  time" only when the probe error is literally a timeout.
+
+**Trust line, not trust repetition.** The header carries one concise indicator (Safety guard on /
+Activity log intact, or the specific problem). The plain Overview does not repeat it; the technical
+safety detail (watchdog identity and budgets, audit event count) is under Details and System.
+
+**Four areas.** Overview, Incidents, Activity (the audit), System (control plane, diagnostics,
+read-only configuration, about, and the confirmed stop). `?` is Help. The old Settings, Diagnostics,
+About and Control Plane screens become sections of System; no information or action is dropped. `D` on
+System keeps meaning "run diagnostics again" (details are always shown there).
+
+**Accessibility.** The default palette becomes the terminal's own ANSI colors, which follow a light or a
+dark theme (the fixed RGB palette had 1.8 to 2.4:1 contrast on a light background); `--theme dark`
+keeps the old look. `NO_COLOR` (or `--theme mono`) removes color entirely: state is already always a
+word plus a glyph, selection and banners use reverse video. Stale values are no longer dimmed (about
+2.2:1): they stay at full contrast and carry an explicit "Stale · observed Ns ago". Error messages stay
+until the next key press instead of vanishing after 10 seconds.

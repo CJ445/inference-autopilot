@@ -4,6 +4,7 @@ pub mod api;
 pub mod app;
 pub mod http;
 pub mod model;
+pub mod plain;
 pub mod theme;
 pub mod timeparse;
 pub mod ui;

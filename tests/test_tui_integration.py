@@ -218,8 +218,11 @@ def once(tui_bin, url, *args):
 def test_the_tui_shows_the_live_state_of_the_real_control_plane(term, cp):
     t = term(cp.url)
     assert t.wait_for("● CONTROL ONLINE")
-    for needle in ["stand-in", "inc_001", "GPU_MEMORY_PRESSURE", "AWAITING APPROVAL",
-                   "restart_workload", "● ARMED", "AUDIT ✓ VERIFIED"]:
+    for needle in ["stand-in", "inc_001", "GPU memory is above its limit", "Needs your OK"]:
+        assert t.wait_for(needle), needle                       # the plain default view
+    t.send(b"d")                                                # D: the technical view
+    for needle in ["GPU_MEMORY_PRESSURE", "AWAITING APPROVAL", "restart_workload", "● ARMED",
+                   "AUDIT ✓ VERIFIED"]:
         assert t.wait_for(needle), needle
 
 
@@ -227,11 +230,11 @@ def test_confirmation_stands_between_the_keypress_and_the_action(term, cp):
     t = term(cp.url)
     assert t.wait_for("inc_001")
     t.send(b"\r")                                   # inspect
-    assert t.wait_for("· inc_001 ·") and t.wait_for("AWAITING APPROVAL")
+    assert t.wait_for("· inc_001 ·") and t.wait_for("Needs your OK")
     mark = t.mark()
     t.send(b"a")
-    assert t.wait_for("Approve restart_workload?", since=mark)
-    assert t.wait_for("[Enter] Confirm", since=mark)
+    assert t.wait_screen("Approve: Restart the model server?")
+    assert t.wait_screen("[Enter] Confirm")
     time.sleep(1.0)
     assert cp.world.restarts == 0                   # nothing happens without the confirmation
     t.send(b"\x1b")                                 # Esc cancels
@@ -244,9 +247,9 @@ def test_approving_through_the_tui_goes_through_the_servers_policy_and_resolves(
     t = term(cp.url)
     assert t.wait_for("inc_001")
     t.send(b"\r")
-    assert t.wait_screen("Classification")           # the incident's detail (with its RCA) loaded
+    assert t.wait_screen("[ A ] Approve")                     # the incident's detail has loaded
     t.send(b"a")
-    assert t.wait_for("Approve restart_workload?")
+    assert t.wait_screen("Approve: Restart the model server?")
     t.send(b"\r")                                   # too soon: the key-repeat guard ignores it
     time.sleep(0.8)
     assert cp.world.restarts == 0
@@ -259,19 +262,23 @@ def test_approving_through_the_tui_goes_through_the_servers_policy_and_resolves(
     assert detail["status"] == "RESOLVED" and detail["remediation"]["state"] == "EXECUTED"
     assert any(e["event"] == "approval_granted" for e in cp.api("/api/v1/audit")["events"])
     assert t.wait_for("RESOLVED")                   # shown because the server said so
-    frame = once(tui_bin, cp.url, "--screen", "detail:inc_001", "--height", "60")
+    frame = once(tui_bin, cp.url, "--screen", "detail:inc_001", "--height", "60", "--details")
     assert frame.returncode == 0
     for needle in ["Verification", "✓ Workload identity changed", "RESULT", "RESOLVED"]:
         assert needle in frame.stdout, frame.stdout
+    plain = once(tui_bin, cp.url, "--screen", "detail:inc_001", "--height", "60")   # the default
+    for needle in ["Recovery check", "✓ The model server was restarted", "Resolved"]:
+        assert needle in plain.stdout, plain.stdout
+    assert "RESULT" not in plain.stdout
 
 
 def test_rejecting_through_the_tui_asks_the_server_to_reject_and_restarts_nothing(term, cp):
     t = term(cp.url)
     assert t.wait_for("inc_001")
     t.send(b"\r")                                   # review the incident first
-    assert t.wait_screen("Classification")
+    assert t.wait_screen("[ A ] Approve")
     t.send(b"r")
-    assert t.wait_for("Reject restart_workload?")
+    assert t.wait_screen("Reject: Restart the model server?")
     time.sleep(0.8)
     t.send(b"\r")
     deadline = time.monotonic() + 10
@@ -286,9 +293,9 @@ def test_a_server_refusal_is_shown_to_the_operator(term, cp):
     t = term(cp.url)
     assert t.wait_for("inc_001")
     t.send(b"\r")
-    assert t.wait_screen("Classification")           # the incident's detail (with its RCA) loaded
+    assert t.wait_screen("[ A ] Approve")                     # the incident's detail has loaded
     t.send(b"a")
-    assert t.wait_for("Approve restart_workload?")
+    assert t.wait_screen("Approve: Restart the model server?")
     # the incident is decided elsewhere before the operator confirms
     urllib.request.urlopen(urllib.request.Request(
         cp.url + "/api/v1/incidents/inc_001/remediation/reject", method="POST", data=b""), timeout=5)
@@ -422,8 +429,10 @@ def test_screens_can_be_switched_and_the_audit_log_is_shown(term, cp):
     t = term(cp.url)
     assert t.wait_for("● CONTROL ONLINE")
     t.send(b"3")
-    assert t.wait_screen("Audit log")      # the emulated screen: ratatui redraws only changed cells
-    assert t.wait_screen("incident_created") and t.wait_screen("rca_generated")
+    assert t.wait_screen("Activity log intact")   # the emulated screen: ratatui redraws only changed cells
+    assert t.wait_screen("Problem detected") and t.wait_screen("Cause assessed")
+    t.send(b"d")                                              # D: the raw events
+    assert t.wait_screen("Audit log") and t.wait_screen("incident_created") and t.wait_screen("rca_generated")
     t.send(b"2")
     assert t.wait_screen("CATEGORY") and t.wait_screen("inc_001")
 
@@ -521,20 +530,21 @@ def test_the_tui_follows_the_workload_appearing_stopping_and_disappearing(term, 
     try:
         t = term(plane.url)
         assert t.wait_screen("● CONTROL ONLINE")
-        assert t.wait_screen("No workload running") and t.wait_screen("○ NO WORKLOAD")
-        assert "✗ UNRESPONSIVE" not in t.screen() and "Probe" not in t.screen()
+        assert t.wait_screen("No workload connected")
+        assert "not answering" not in t.screen() and "Not answering" not in t.screen()
         assert plane.api("/api/v1/status")["workload"]["state"] == "absent"
 
         holder["state"] = "running"                      # the operator starts the workload
         deadline = time.monotonic() + 15
-        while time.monotonic() < deadline and "No workload running" in t.screen():
+        while time.monotonic() < deadline and "No workload connected" in t.screen():
             t.pump(0.2)
-        assert "No workload running" not in t.screen() and t.wait_screen("Observed")
+        assert "No workload connected" not in t.screen(), t.screen()
+        assert t.wait_screen("No reading yet")           # present, but nothing observed yet: said, not invented
 
         holder["state"] = "stopped"                      # ... stops it
-        assert t.wait_screen("○ STOPPED") and t.wait_screen("Workload stopped")
+        assert t.wait_screen("The workload is stopped")
         holder["state"] = "absent"                       # ... removes it
-        assert t.wait_screen("○ NO WORKLOAD") and t.wait_screen("No workload running")
+        assert t.wait_screen("No workload connected")
         assert plane.world.restarts == 0                 # no remediation ever had anything to act on
         t.send(b"q")
         assert t.proc.wait(timeout=10) == 0
@@ -548,11 +558,14 @@ def test_real_arrow_key_escape_sequences_switch_screens_and_scroll(term, cp):
     for seq in (b"\x1b[C", b"\x1bOC"):                 # → in normal and application cursor mode
         t.send(seq)
         t.pump(0.4)
-    assert t.wait_screen("Audit log")                  # Overview -> Incidents -> Audit
+    assert t.wait_screen("Activity log")               # Overview -> Incidents -> Audit
     t.send(b"\x1b[D")                                  # ←
-    assert t.wait_screen("CATEGORY")                   # back on Incidents
+    assert t.wait_screen("PROBLEM")                    # back on Incidents
     t.send(b"\r")                                      # inspect, then scroll with ↓ / ↑
-    assert t.wait_screen("Evidence") and t.wait_screen("Classification")   # detail fully loaded
+    assert t.wait_screen("What happened") and t.wait_screen("Recommended action")   # the detail page
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and "Loading the full details" in t.screen():
+        t.pump(0.2)                                    # the page changes once the full detail arrives
     first = t.screen()
     t.send(b"\x1b[B" * 8)
     t.pump(0.6)
@@ -567,7 +580,7 @@ def test_a_and_r_on_the_overview_explain_instead_of_deciding(term, cp):
     assert t.wait_screen("inc_001")
     t.send(b"a")
     assert t.wait_screen("open the incident")
-    assert "Approve restart_workload?" not in t.screen()
+    assert "Approve: Restart the model server?" not in t.screen()
     time.sleep(0.6)
     assert cp.world.restarts == 0
 
@@ -576,9 +589,9 @@ def test_the_confirmation_shows_the_reason_and_the_effect_and_progress_is_inline
     t = term(cp.url)
     assert t.wait_screen("inc_001")
     t.send(b"\r")
-    assert t.wait_screen("Classification")
+    assert t.wait_screen("[ A ] Approve")
     t.send(b"a")
-    for needle in ["Approve restart_workload?", "Why", "exhausted available", "Effect",
+    for needle in ["Approve: Restart the model server?", "Why", "exhausted available", "Effect",
                    "no rollback", "[Enter] Confirm"]:
         assert t.wait_screen(needle), needle
     time.sleep(0.8)
@@ -587,22 +600,22 @@ def test_the_confirmation_shows_the_reason_and_the_effect_and_progress_is_inline
     while time.monotonic() < deadline and cp.world.restarts == 0:
         t.pump(0.1)
     assert cp.world.restarts == 1
-    assert t.wait_screen("RESOLVED")
+    assert t.wait_screen("Resolved")
 
 
 def test_practice_walks_the_whole_loop_in_the_tui_without_touching_the_real_system(term, cp):
     t = term(cp.url, rows=36, cols=130)
-    assert t.wait_screen("GPU_MEMORY_PRESSURE")                  # the REAL stand-in incident is on screen
+    assert t.wait_screen("GPU memory is above its limit")       # the REAL stand-in incident is on screen
     t.send(b"p")
     assert t.wait_screen("PRACTICE · SIMULATION")
     assert t.wait_screen("Everything is healthy. Press F to break the model")
-    assert "GPU_MEMORY_PRESSURE" not in t.screen()                # none of the real data is shown
+    assert "GPU memory is above its limit" not in t.screen()       # none of the real data is shown
     t.send(b"f")
     assert t.wait_screen("Open the incident (Enter), review it, then approve (A).", timeout=15)
-    assert t.wait_screen("INFERENCE_UNRESPONSIVE")
+    assert t.wait_screen("Your model stopped answering")
     t.send(b"\r")
-    assert t.wait_screen("Classification")                        # the incident page, practice data
-    assert "GPU_MEMORY_PRESSURE" not in t.screen() and "PRACTICE · SIMULATION" in t.screen()
+    assert t.wait_screen("[ A ] Approve")                         # the incident page, practice data
+    assert "GPU memory is above its limit" not in t.screen() and "PRACTICE · SIMULATION" in t.screen()
     t.send(b"a")
     assert t.wait_screen("A simulated restart: nothing real is restarted.")
     time.sleep(0.8)
@@ -613,7 +626,7 @@ def test_practice_walks_the_whole_loop_in_the_tui_without_touching_the_real_syst
     t.send(b"\x1b")                                               # back to the practice overview
     time.sleep(0.6)
     t.send(b"\x1b")                                               # leave practice
-    assert t.wait_screen("GPU_MEMORY_PRESSURE")                   # the real system is back
+    assert t.wait_screen("GPU memory is above its limit")        # the real system is back
     assert "PRACTICE" not in t.screen() and "SIMULATION" not in t.screen()
     assert cp.practice.session is None                             # and the simulation was discarded
     assert cp.world.restarts == 0
@@ -648,7 +661,7 @@ def test_the_real_fault_needs_an_explicit_confirmation_and_is_visible_until_it_e
     assert t.wait_screen("LIVE · GPU-REAL · FAULT ACTIVE")
     assert docker.main.paused and cp.faults.lease_or_none()["status"] == "ACTIVE"
     t.send(b"3")
-    assert t.wait_screen("FAULT ACTIVE") and t.wait_screen("Audit log")   # on every screen
+    assert t.wait_screen("FAULT ACTIVE") and t.wait_screen("Activity log")   # on every screen
     assert cp.world.restarts == 0                                         # a fault is not a remediation
 
     t.send(b"\x10")

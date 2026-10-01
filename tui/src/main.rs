@@ -30,11 +30,12 @@ const DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(120);
 const HELP: &str = "aiops-tui: operator interface for the Inference Autopilot control plane
 
 USAGE: aiops-tui [--url URL] [--interval-ms N] [--timeout-ms N]
-       aiops-tui --once [--screen dashboard|incidents|audit|control|settings|diagnostics|about|help|detail:ID] [--width N] [--height N]
+       aiops-tui --once [--screen dashboard|incidents|audit|control|settings|diagnostics|about|help|detail:ID] [--width N] [--height N] [--details]
 
   --url URL         control-plane API (loopback http only)   [default http://127.0.0.1:8080]
   --interval-ms N   refresh interval, 250..10000             [default 750]
   --timeout-ms N    per-request timeout, 200..30000          [default 2000]
+  --details         start in the technical view (exact names, raw states); D toggles it
   --once            print one frame of the REAL current state as text and exit
                     (exit status 3 if the control plane is unreachable)
 
@@ -48,6 +49,7 @@ struct Opts {
     timeout: Duration,
     once: bool,
     screen: String,
+    details: bool,
     width: u16,
     height: u16,
 }
@@ -68,6 +70,7 @@ fn parse_args(args: Vec<String>) -> Result<Opts, String> {
         timeout: Duration::from_millis(2000),
         once: false,
         screen: "dashboard".into(),
+        details: false,
         width: 120,
         height: 40,
     };
@@ -78,6 +81,7 @@ fn parse_args(args: Vec<String>) -> Result<Opts, String> {
             "--interval-ms" => o.interval = Duration::from_millis(number("--interval-ms", it.next(), 250, 10_000)?),
             "--timeout-ms" => o.timeout = Duration::from_millis(number("--timeout-ms", it.next(), 200, 30_000)?),
             "--once" => o.once = true,
+            "--details" => o.details = true,
             "--screen" => o.screen = it.next().ok_or("--screen needs a value")?,
             "--width" => o.width = number("--width", it.next(), 20, 500)?,
             "--height" => o.height = number("--height", it.next(), 3, 200)?,
@@ -168,6 +172,7 @@ fn once(o: &Opts) -> ExitCode {
         }
     };
     let mut app = App::new(o.url.clone());
+    app.details = o.details;
     app.wall = wall_clock();
     match o.screen.as_str() {
         "dashboard" => {}
@@ -231,6 +236,7 @@ fn interactive(o: &Opts) -> Result<(), String> {
     spawn_poller(client.clone(), o.interval, interest.clone(), tx.clone(), wake_rx);
 
     let mut app = App::new(o.url.clone());
+    app.details = o.details;
     app.client = ClientInfo {
         interval_ms: Some(o.interval.as_millis() as u64),
         timeout_ms: Some(o.timeout.as_millis() as u64),

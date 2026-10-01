@@ -105,6 +105,7 @@ pub enum Command {
     ExitPractice,
     BreakWorkload,
     ResumeWorkload,
+    ToggleDetails,
     Quit,
 }
 
@@ -122,7 +123,7 @@ pub struct Offer {
 pub const FAULT_SECONDS: u32 = 120;
 
 impl Command {
-    pub const ALL: [Command; 15] = [
+    pub const ALL: [Command; 16] = [
         Command::Overview,
         Command::Incidents,
         Command::Audit,
@@ -137,6 +138,7 @@ impl Command {
         Command::ExitPractice,
         Command::BreakWorkload,
         Command::ResumeWorkload,
+        Command::ToggleDetails,
         Command::Quit,
     ];
 
@@ -156,6 +158,7 @@ impl Command {
             Command::ExitPractice => "Exit practice",
             Command::BreakWorkload => "Break the real workload (pause)…",
             Command::ResumeWorkload => "Resume the workload now",
+            Command::ToggleDetails => "Show or hide technical details",
             Command::Quit => "Quit",
         }
     }
@@ -207,10 +210,10 @@ pub const KEYMAP: [(&str, &str); 17] = [
     ("Ctrl+P", "Command palette"),
     ("P", "Practice an incident (simulated; nothing real is touched)"),
     ("F", "Break the model while practicing (simulated)"),
+    ("D", "Show or hide technical details (Diagnostics: run again)"),
     ("S", "Refresh now"),
     ("A", "Approve (on an incident's page, once it awaits a decision)"),
     ("R", "Reject (on an incident's page, once it awaits a decision)"),
-    ("D", "Run diagnostics again (Diagnostics screen)"),
     ("X", "Stop the control plane (Control Plane screen)"),
     ("Q", "Quit (the control plane keeps running)"),
     ("Ctrl+C", "Quit"),
@@ -338,6 +341,8 @@ pub struct App {
     pub palette: Option<Palette>,
     /// True while a practice (SIMULATION) session is on screen. Everything shown is simulated.
     pub practice: bool,
+    /// Show the technical views (exact names, raw states, metrics) instead of the plain ones.
+    pub details: bool,
     pub stop_confirm: bool,
     pub stop_opened: Instant,
     /// The dialog that asks before a REAL workload is paused.
@@ -376,6 +381,7 @@ impl App {
             diag: Remote::Idle,
             palette: None,
             practice: false,
+            details: false,
             stop_confirm: false,
             stop_opened: Instant::now(),
             fault_confirm: false,
@@ -555,6 +561,7 @@ impl App {
             KeyCode::Char('d') | KeyCode::Char('D') if self.screen == Screen::Diagnostics => {
                 fx = self.load_diagnostics(true)
             }
+            KeyCode::Char('d') | KeyCode::Char('D') => self.details = !self.details,
             KeyCode::Char('x') | KeyCode::Char('X') if self.screen == Screen::ControlPlane => {
                 self.begin_stop()
             }
@@ -633,6 +640,10 @@ impl App {
                     self.say("no fault is active", true);
                     Vec::new()
                 }
+            }
+            Command::ToggleDetails => {
+                self.details = !self.details;
+                Vec::new()
             }
             Command::Quit => vec![Effect::Quit],
         }

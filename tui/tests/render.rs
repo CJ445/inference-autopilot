@@ -33,6 +33,7 @@ fn status(json: &str) -> Status {
 fn app_with(snapshot: Snapshot) -> App {
     let mut app = App::new("http://127.0.0.1:8080".into());
     app.wall = T + 1.25; // one second after the fixture's observation
+    app.details = true; // these tests cover the TECHNICAL views, now behind `D`
     app.apply(Msg::Poll(Ok(snapshot)));
     app
 }
@@ -144,6 +145,7 @@ fn without_any_observation_the_gpu_and_vllm_panels_say_na() {
 #[test]
 fn live_rates_appear_only_when_two_real_observations_exist() {
     let mut a = App::new("http://127.0.0.1:8080".into());
+    a.details = true;
     a.wall = T + 12.0;
     for (at, count, sum) in [("2026-10-01T15:02:01+00:00", 10.0, 1.0), ("2026-10-01T15:02:11+00:00", 20.0, 1.5)] {
         let mut st = status(HEALTHY);
@@ -291,7 +293,7 @@ fn approval_is_confirmed_with_the_incident_the_reason_and_the_effect() {
     let mut a = detail_app(PENDING);                       // review the incident first
     ch(&mut a, 'a');
     let s = text(&a, 110, 40);
-    for needle in ["Approve restart_workload?", "Incident", "inc_001", "INFERENCE_UNRESPONSIVE", "Workload", "vllm",
+    for needle in ["Approve: Restart the model server?", "Incident", "inc_001", "Your model stopped answering", "Workload", "vllm",
                    "Why", "Inference requests are failing or timing out", "Effect",
                    "Restarts the workload", "no rollback",
                    "[Enter] Confirm", "[Esc] Cancel"] {
@@ -313,9 +315,9 @@ fn rejection_has_its_own_clearly_labelled_confirmation() {
     let mut a = detail_app(PENDING);
     ch(&mut a, 'r');
     let s = text(&a, 110, 40);
-    has(&s, "Reject restart_workload?");
+    has(&s, "Reject: Restart the model server?");
     has(&s, "No action is taken on the workload");
-    lacks(&s, "Approve restart_workload?");
+    lacks(&s, "Approve: Restart the model server?");
     lacks(&s, "no rollback");
 }
 

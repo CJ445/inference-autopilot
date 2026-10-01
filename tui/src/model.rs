@@ -202,6 +202,9 @@ pub struct Remediation {
 pub struct Verification {
     #[serde(default)]
     pub checks: Option<BTreeMap<String, bool>>,
+    /// How many completions in a row recovery must show, when the server knows (else absent).
+    #[serde(default)]
+    pub required_completions: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

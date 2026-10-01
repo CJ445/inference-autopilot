@@ -346,3 +346,14 @@ def test_a_failing_write_is_never_retried(api):
     w.get_workload = boom
     status, _ = call(base, f"/api/v1/incidents/{inc.incident_id}/remediation/approve", "POST")
     assert status == 500 and len(calls) == 1               # executed once, not five times
+
+
+def test_the_incident_detail_says_how_many_completions_recovery_must_show_when_it_is_known(api):
+    base, engine, _ = api
+    engine.tick()
+    iid = engine.incidents[0].incident_id
+    code, detail = call(base, f"/api/v1/incidents/{iid}")
+    assert code == 200 and "required_completions" not in detail["verification"]    # this engine has none
+    engine.config["stable_probes"] = 3
+    code, detail = call(base, f"/api/v1/incidents/{iid}")
+    assert detail["verification"] == {"checks": None, "required_completions": 3}

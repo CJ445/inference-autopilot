@@ -29,9 +29,9 @@ pytestmark = pytest.mark.skipif(
     reason="set AIOPS_GPU=1 on a machine with an NVIDIA GPU and the vLLM image")
 
 
-def frame(tui_bin, port, *args):
+def frame(tui_bin, port, *args, details=True):
     r = subprocess.run([tui_bin, "--once", "--url", f"http://127.0.0.1:{port}", "--height", "70",
-                        *args], capture_output=True, text=True, timeout=30)
+                        *(["--details"] if details else []), *args], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stdout + r.stderr
     return r.stdout
 
@@ -48,6 +48,11 @@ def test_the_operator_tui_drives_a_real_remediation_end_to_end(vllm, tmp_path, t
         try:
             # -- healthy: real GPU, real vLLM, real safety state, all from the API -------------
             assert t.wait_screen("● CONTROL ONLINE", timeout=30)
+            # the default view is plain, from the same real telemetry ...
+            for needle in ["Everything is working", "Answering ·", "% memory used", "Nothing right now"]:
+                assert t.wait_screen(needle, timeout=20), needle
+            assert "Probe" not in t.vs.text() and "VRAM" not in t.vs.text()
+            t.send(b"d")                                   # ... D shows the technical view for the rest
             for needle in ["docker-real-gpu", "GPU 0", uuid[:12], "VRAM", "GiB", "● HEALTHY",
                            "Probe ✓", "Metrics ✓", "No active incidents", "● ARMED",
                            "Identity ✓", "Budgets ✓", "AUDIT ✓ VERIFIED", f"vLLM · {MODEL}"]:
@@ -81,7 +86,7 @@ def test_the_operator_tui_drives_a_real_remediation_end_to_end(vllm, tmp_path, t
             # -- approve THROUGH THE TUI: a confirmation first, then exactly one server action ----
             mark = t.mark()
             t.send(b"a")
-            assert t.wait_screen("Approve restart_workload?")
+            assert t.wait_screen("Approve: Restart the model server?")
             assert t.wait_screen("[Enter] Confirm")
             time.sleep(1.5)
             assert provider.get_workload("vllm")["id"] == id_before     # the dialog did nothing
@@ -103,6 +108,11 @@ def test_the_operator_tui_drives_a_real_remediation_end_to_end(vllm, tmp_path, t
                            "VERIFYING"]:
                 assert needle in final, final
             assert "✗" not in final.split("Verification")[1].split("Timeline")[0]
+            plain = frame(tui_bin, c.port, "--screen", "detail:inc_001", details=False)
+            for needle in ["Your model stopped answering", "● Resolved", "✓ The model server was restarted",
+                           "✓ The model answered 3 test requests in a row", "You approved the fix"]:
+                assert needle in plain, plain                  # the same real facts, in plain words
+            assert "✗" not in plain.split("Recovery check")[1].split("Step by step")[0]
 
             # -- independent proof, from the real infrastructure and the real audit ----------------
             assert provider.get_workload("vllm")["id"] != id_before     # genuinely restarted

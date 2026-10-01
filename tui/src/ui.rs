@@ -16,6 +16,7 @@ use serde_json::Value;
 use crate::app::{is_closed, ActionKind, App, Conn, Remote, Screen, CONFIRM_GUARD, KEYMAP, SCREEN_ORDER};
 use crate::model::{flag, num, text, Check, Evidence, Incident, Obj, Watchdog};
 use crate::theme::{self, ACCENT, BORDER, CRITICAL, HEALTHY, TEXT_MUTED, WARNING};
+use crate::plain as words;
 use crate::timeparse::{clock_hms, parse_rfc3339};
 
 pub const MIN_W: u16 = 72;
@@ -191,10 +192,13 @@ pub fn render(f: &mut Frame, app: &App) {
         body[1]
     };
     match &app.screen {
-        Screen::Dashboard => overview(f, pane, app),
-        Screen::Incidents => incidents(f, pane, app),
+        Screen::Dashboard if app.details => overview(f, pane, app),
+        Screen::Dashboard => overview_plain(f, pane, app),
+        Screen::Incidents if app.details => incidents(f, pane, app),
+        Screen::Incidents => incidents_plain(f, pane, app),
         Screen::Detail(id) => detail(f, pane, app, id),
-        Screen::Audit => audit(f, pane, app),
+        Screen::Audit if app.details => audit(f, pane, app),
+        Screen::Audit => audit_plain(f, pane, app),
         Screen::ControlPlane => control_plane(f, pane, app),
         Screen::Settings => settings(f, pane, app),
         Screen::Diagnostics => diagnostics(f, pane, app),
@@ -367,6 +371,9 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
                 }
             } else {
                 hints.push(("P", "Practice", true, 4));
+            }
+            if app.screen != Screen::Diagnostics {
+                hints.push(("D", if app.details { "Simple view" } else { "Details" }, true, 5));
             }
             match app.screen {
                 Screen::Diagnostics => hints.push(("D", "Run again", true, 7)),
@@ -741,6 +748,347 @@ fn safety_section(app: &App, w: usize) -> Vec<Line<'static>> {
     vec![rule("Safety", None, w), kv("WATCHDOG", dog), audit_line]
 }
 
+
+// ---- plain (default) views ---------------------------------------------------------------------
+// Written from the same data as the technical views, in words a person follows. `D` shows the
+// technical versions; nothing here is removed from them.
+
+fn plain_chip(status: &str) -> Span<'static> {
+    let (_, color) = theme::state(status);
+    bold(format!("● {}", words::state_phrase(status)), color)
+}
+
+/// One sentence for the whole system, and the colour that sentence deserves.
+fn overall(app: &App) -> (String, Color) {
+    if matches!(app.conn, Conn::Offline { .. }) {
+        return ("Cannot reach the control plane".into(), CRITICAL);
+    }
+    let rows = app.rows();
+    let active: Vec<&&Incident> = rows.iter().filter(|i| !is_closed(&i.status)).collect();
+    if active.iter().any(|i| awaiting_decision(i)) {
+        return ("A problem needs your OK".into(), WARNING);
+    }
+    if !active.is_empty() {
+        return ("Working on a problem".into(), WARNING);
+    }
+    match workload_state(app) {
+        Some("absent") => return ("No workload connected".into(), TEXT_MUTED),
+        Some("stopped") => return ("The workload is stopped".into(), TEXT_MUTED),
+        Some("starting") => return ("Your model is starting".into(), WARNING),
+        _ => {}
+    }
+    match observation(app).and_then(|o| flag(o, "inference_probe_ok")) {
+        Some(false) => ("Your model is not answering".into(), CRITICAL),
+        Some(true) => ("Everything is working".into(), HEALTHY),
+        None => ("Waiting for the first reading".into(), TEXT_MUTED),
+    }
+}
+
+fn overview_plain(f: &mut Frame, area: Rect, app: &App) {
+    if app.snapshot.is_none() {
+        return no_data(f, area, app);
+    }
+    let w = area.width as usize;
+    let (headline, color) = overall(app);
+    let mut l = vec![blank(), Line::from(vec![plain(" "), bold(headline, color)])];
+    if app.practice {
+        l.push(blank());
+        l.extend(practice_guide(app));
+    }
+    l.push(blank());
+    l.push(rule("Your model", None, w));
+    l.extend(model_lines(app));
+    l.push(blank());
+    l.push(rule("GPU", Some(provenance(app)), w));
+    l.push(gpu_line(app));
+    l.push(blank());
+    l.push(rule("Needs attention", None, w));
+    l.extend(attention_rows(app, w));
+    l.push(blank());
+    let mut hints = String::from(" D  Technical details");
+    if !app.practice {
+        hints.insert_str(0, " P  Practice an incident   ");
+    }
+    l.push(Line::from(muted(hints)));
+    f.render_widget(Paragraph::new(l), area);
+}
+
+fn model_lines(app: &App) -> Vec<Line<'static>> {
+    match workload_state(app) {
+        Some("absent") => {
+            return vec![
+                Line::from(vec![plain(" "), bold("No workload connected", theme::TEXT)]),
+                Line::from(muted(" The control plane is running and waiting for an operator-managed inference workload.")),
+            ]
+        }
+        Some("stopped") => {
+            return vec![
+                Line::from(vec![plain(" "), bold("The workload is stopped", theme::TEXT)]),
+                Line::from(muted(" Start it when you want to run inference; it is picked up automatically.")),
+            ]
+        }
+        _ => {}
+    }
+    let info = app.snapshot.as_ref().map(|s| &s.status.info);
+    let name = na(info.and_then(|i| i.model.clone().or_else(|| i.workload.clone())));
+    let o = observation(app);
+    let status = if workload_state(app) == Some("starting") {
+        span("Starting up", WARNING)
+    } else {
+        match o.and_then(|o| flag(o, "inference_probe_ok")) {
+            Some(true) => {
+                let ms = o.and_then(|o| num(o, "inference_probe_latency_ms"));
+                span(format!("Answering · {}", na(ms.map(|m| format!("{m:.0} ms")))), HEALTHY)
+            }
+            Some(false) => bold("Not answering", CRITICAL),
+            None => muted("No reading yet"),
+        }
+    };
+    vec![Line::from(vec![plain(" "), bold(name, theme::TEXT), plain("   "), status])]
+}
+
+fn gpu_line(app: &App) -> Line<'static> {
+    let o = observation(app);
+    let used = o.and_then(|o| num(o, "gpu_memory_used_bytes"));
+    let total = o.and_then(|o| num(o, "gpu_memory_total_bytes")).filter(|t| *t > 0.0);
+    let temp = o.and_then(|o| num(o, "gpu_temperature_c"));
+    let mut text = match (used, total) {
+        (Some(u), Some(t)) => format!("{:.0}% memory used", u / t * 100.0),
+        _ => return Line::from(vec![plain(" "), muted("N/A")]),
+    };
+    if let Some(t) = temp {
+        text.push_str(&format!(" · {t:.0}°C"));
+    }
+    Line::from(vec![plain(" "), plain(text)])
+}
+
+fn started_at(i: &Incident) -> String {
+    first_time(i)
+}
+
+fn attention_rows(app: &App, w: usize) -> Vec<Line<'static>> {
+    let rows = app.rows();
+    let (active, closed): (Vec<_>, Vec<_>) = rows.iter().enumerate().partition(|(_, i)| !is_closed(&i.status));
+    let row = |idx: usize, spans: Vec<Span<'static>>| {
+        let sel = idx == app.selected;
+        let mut s = vec![if sel { bold(" › ", ACCENT) } else { plain("   ") }];
+        s.extend(spans);
+        if sel { highlighted(s, w) } else { Line::from(s) }
+    };
+    let mut lines = Vec::new();
+    if active.is_empty() {
+        lines.push(Line::from(span("   Nothing right now", HEALTHY)));
+    }
+    for (idx, i) in &active {
+        lines.push(row(*idx, vec![
+            plain(format!("{}   ", words::problem_title(&i.category))),
+            plain_chip(&i.status),
+            muted(format!("   {} · {}", i.incident_id, started_at(i))),
+        ]));
+    }
+    if !closed.is_empty() {
+        lines.push(Line::from(muted("   Recent")));
+        for (idx, i) in &closed {
+            let (_, color) = theme::state(&i.status);
+            lines.push(row(*idx, vec![
+                muted(format!("{}  {}  {} → ", last_time(i), i.incident_id, words::problem_title(&i.category))),
+                span(words::state_phrase(&i.status), color),
+            ]));
+        }
+    }
+    lines
+}
+
+fn incidents_plain(f: &mut Frame, area: Rect, app: &App) {
+    let w = area.width as usize;
+    let rows = app.rows();
+    if rows.is_empty() {
+        let mut l = vec![
+            blank(),
+            Line::from(vec![plain(" "), bold("No incidents", theme::TEXT)]),
+            blank(),
+            Line::from(" Everything is healthy right now."),
+            blank(),
+        ];
+        if !app.practice {
+            l.push(Line::from(muted(" P  Practice an incident (simulated; nothing real is touched)")));
+        }
+        return f.render_widget(Paragraph::new(l), area);
+    }
+    // narrow terminals keep what matters: the problem and its state
+    let wide = w >= 70;
+    let head = if wide { format!("   {:<9} {:<34} {:<22} {}", "ID", "PROBLEM", "STATUS", "STARTED") }
+               else { format!("   {:<32} {}", "PROBLEM", "STATUS") };
+    let mut lines = vec![blank(), Line::from(muted(head)), hline(w)];
+    for (idx, i) in rows.iter().enumerate() {
+        let sel = idx == app.selected;
+        let (_, color) = theme::state(&i.status);
+        let mut spans = vec![if sel { bold(" › ", ACCENT) } else { plain("   ") }];
+        if wide {
+            spans.push(span(format!("{:<9} ", i.incident_id), ACCENT));
+        }
+        let title_w = if wide { 34 } else { 32 };
+        spans.push(plain(format!("{:<title_w$} ", words::problem_title(&i.category))));
+        spans.push(bold(format!("{:<22} ", format!("● {}", words::state_phrase(&i.status))), color));
+        if wide {
+            spans.push(muted(started_at(i)));
+        }
+        lines.push(if sel { highlighted(spans, w) } else { Line::from(spans) });
+    }
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+/// The pipeline in words a person follows: Policy and Approval are one step ("Your OK").
+fn plain_tracker(status: &str, width: usize) -> Option<Line<'static>> {
+    let s = stages(status);
+    let merged = {
+        let (a, b) = (s[3], s[4]);
+        if a == Stage::Current || b == Stage::Current { Stage::Current }
+        else if a == Stage::Done && b == Stage::Done { Stage::Done }
+        else if a == Stage::Skipped && b == Stage::Skipped { Stage::Skipped }
+        else if a == Stage::Done && b == Stage::Skipped { Stage::Skipped }
+        else { Stage::Todo }
+    };
+    let steps = [("Detected", s[0]), ("Diagnosed", s[1]), ("Proposed", s[2]), ("Your OK", merged),
+                 ("Fixing", s[5]), ("Checking", s[6]), ("Result", s[7])];
+    let total: usize = steps.iter().map(|(n, _)| n.len()).sum::<usize>() + 3 * (steps.len() - 1) + 1;
+    if width < total + 1 {
+        return None;
+    }
+    let mut spans = vec![plain(" ")];
+    for (n, (name, st)) in steps.iter().enumerate() {
+        if n > 0 {
+            spans.push(span(" › ", BORDER));
+        }
+        spans.push(match st {
+            Stage::Done => plain(*name),
+            Stage::Current => Span::styled(name.to_string(), fg(ACCENT).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Stage::Todo => muted(*name),
+            Stage::Skipped => Span::styled(name.to_string(), fg(BORDER).add_modifier(Modifier::CROSSED_OUT)),
+        });
+    }
+    Some(Line::from(spans))
+}
+
+fn detail_plain(i: &Incident, w: usize, app: &App) -> Vec<Line<'static>> {
+    let required = i.verification.as_ref().and_then(|v| v.required_completions);
+    let mut l: Vec<Line> = Vec::new();
+    l.push(split_row(vec![plain(" "), bold(words::problem_title(&i.category), theme::TEXT)], vec![plain_chip(&i.status)], w));
+    l.push(Line::from(muted(format!(
+        " {} · {} · started {}",
+        i.service.clone().unwrap_or_else(|| "N/A".into()), i.incident_id, started_at(i)
+    ))));
+    if let Some(t) = plain_tracker(&i.status, w) {
+        l.push(blank());
+        l.push(t);
+    }
+    l.push(blank());
+
+    l.push(rule("What happened", None, w));
+    l.extend(wrapped(words::problem_summary(&i.category).unwrap_or(&words::problem_title(&i.category)), w));
+    l.push(blank());
+
+    l.push(rule("What we found", None, w));
+    match &i.rca {
+        Some(r) if r.insufficient_evidence || r.root_cause.is_none() => {
+            l.push(Line::from(" Not enough evidence to name a cause."));
+        }
+        Some(r) => l.extend(wrapped(r.root_cause.as_ref().map_or("", |c| c.statement.as_str()), w)),
+        None => l.push(Line::from(muted(" N/A"))),
+    }
+    for e in &i.evidence {
+        let sentence = words::evidence_sentence(e).unwrap_or_else(|| format!("{}: {}", words::humanise(&e.metric), e.value));
+        let glyph = match e.relation.as_str() {
+            "supports" => muted("✓"),
+            "contradicts" => span("✗", WARNING),
+            _ => muted("·"),
+        };
+        l.push(Line::from(vec![plain(" "), glyph, plain(format!(" {sentence}"))]));
+    }
+    l.push(blank());
+
+    l.push(rule("Recommended action", None, w));
+    match &i.proposal {
+        Some(p) => {
+            l.push(Line::from(vec![plain(" "), bold(words::action_phrase(&p.action), theme::TEXT)]));
+            if p.action == "restart_workload" {
+                l.push(Line::from(muted(" The model is unavailable while it restarts. There is no rollback.")));
+            }
+        }
+        None if is_closed(&i.status) && i.status != "INSUFFICIENT_EVIDENCE" => {
+            l.push(Line::from(muted(" No proposal in the server's record.")));
+        }
+        None => l.push(Line::from(" No fix is proposed.")),
+    }
+    if awaiting_decision(i) {
+        l.push(Line::from(vec![plain(" "), bold("Needs your OK", WARNING)]));
+        l.push(blank());
+        // a decision needs the full incident on screen: the keys do nothing until it has loaded
+        let loaded = app.snapshot.as_ref().and_then(|s| s.detail.as_ref()).is_some_and(|d| d.incident_id == i.incident_id);
+        if loaded {
+            l.push(split_row(vec![], vec![bold("[ A ] ", ACCENT), plain("Approve    "), bold("[ R ] ", ACCENT), plain("Reject")], w));
+        } else {
+            l.push(Line::from(muted(" Loading the full details…")));
+        }
+    }
+    l.push(blank());
+
+    l.push(rule("Recovery check", None, w));
+    let checks = i.verification.as_ref().and_then(|v| v.checks.as_ref()).filter(|c| !c.is_empty());
+    match checks {
+        Some(checks) => {
+            let mut keys: Vec<&String> = checks.keys().collect();
+            keys.sort_by_key(|k| (CHECK_ORDER.iter().position(|c| c == k).unwrap_or(99), (*k).clone()));
+            for k in keys {
+                l.push(Line::from(vec![plain(" "), mark(Some(checks[k])), plain(format!(" {}", words::check_phrase(k, required)))]));
+            }
+            let (label, color) = (words::state_phrase(&i.status), theme::state(&i.status).1);
+            l.push(blank());
+            l.push(Line::from(vec![plain(" "), bold(label, color)]));
+        }
+        None if matches!(i.status.as_str(), "VERIFYING") => l.push(Line::from(muted(" In progress: waiting for the server's result."))),
+        None if is_closed(&i.status) => l.push(Line::from(muted(" The recovery check did not run."))),
+        None => l.extend(wrapped(&words::recovery_check(required), w)),
+    }
+    l.push(blank());
+
+    l.push(rule("Step by step", None, w));
+    for (time, phrase) in words::timeline_events(i) {
+        l.push(Line::from(vec![muted(format!(" {time}  ")), plain(phrase)]));
+    }
+    l.push(blank());
+    l.push(Line::from(muted(if app.details { " D  Simple view" } else { " D  Technical details" })));
+    l
+}
+
+fn audit_plain(f: &mut Frame, area: Rect, app: &App) {
+    let w = area.width as usize;
+    let s = app.snapshot.as_ref();
+    let fetched = s.and_then(|s| s.audit.as_ref());
+    let valid = fetched.map(|a| a.valid).or_else(|| s.and_then(|s| s.status.audit.as_ref().map(|a| a.valid)));
+    let mut lines = vec![blank(), match valid {
+        Some(true) => Line::from(span(" Activity log intact", HEALTHY)),
+        Some(false) => Line::from(bold(" ACTIVITY LOG INTEGRITY FAILURE", CRITICAL)),
+        None => Line::from(muted(" Activity log N/A")),
+    }];
+    lines.push(rule("What happened", None, w));
+    match fetched {
+        None => lines.push(Line::from(muted(" waiting for the activity log…"))),
+        Some(a) if a.events.is_empty() => {
+            lines.push(Line::from(vec![plain(" "), bold("No activity yet", theme::TEXT)]));
+            lines.push(Line::from(muted(" Actions and decisions will appear here.")));
+        }
+        Some(a) => {
+            for e in &a.events {
+                lines.push(Line::from(vec![muted(" • "), plain(words::event_phrase(e))]));
+            }
+            lines.push(blank());
+            lines.push(Line::from(muted(" D  Technical details (event names, hashes)")));
+        }
+    }
+    f.render_widget(Paragraph::new(lines).scroll((app.scroll, 0)), area);
+}
+
 // ---- incidents screen -----------------------------------------------------------------------
 
 fn first_time(i: &Incident) -> String {
@@ -1011,7 +1359,8 @@ fn detail_lines(i: &Incident, w: usize) -> Vec<Line<'static>> {
 
 fn detail(f: &mut Frame, area: Rect, app: &App, _id: &str) {
     let lines = match app.selected_incident() {
-        Some(i) => detail_lines(i, area.width as usize),
+        Some(i) if app.details => detail_lines(i, area.width as usize),
+        Some(i) => detail_plain(i, area.width as usize, app),
         None => vec![
             blank(),
             Line::from(span(" This incident is no longer reported by the control plane (Esc to go back).", WARNING)),
@@ -1073,13 +1422,13 @@ fn confirm_modal(f: &mut Frame, area: Rect, app: &App) {
     let row = |label: &str, value: String| {
         Line::from(vec![plain(" "), muted(format!("{label:<10}")), plain(value)])
     };
-    let mut lines = vec![Line::from(bold(format!(" {} {}?", c.kind.verb(), c.action), WARNING))];
+    let mut lines = vec![Line::from(bold(format!(" {}: {}?", c.kind.verb(), words::action_phrase(&c.action)), WARNING))];
     if c.practice {
         lines.push(Line::from(vec![plain(" "), bold("PRACTICE · SIMULATION", WARNING), muted("  nothing real is touched")]));
     }
     lines.extend(vec![
         blank(),
-        row("Incident", format!("{}  {}", c.incident_id, c.category)),
+        row("Incident", format!("{}  {}", c.incident_id, words::problem_title(&c.category))),
         row("Workload", c.workload.clone()),
     ]);
     if c.why.is_empty() {

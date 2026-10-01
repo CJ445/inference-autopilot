@@ -194,7 +194,7 @@ fn a_decision_in_practice_is_marked_as_simulated_and_a_real_one_is_not() {
     let sim = decide(true);
     assert!(sim.confirm.as_ref().unwrap().practice);
     let s = screen(&sim);
-    for needle in ["Approve restart_workload?", "PRACTICE · SIMULATION", "nothing real is touched",
+    for needle in ["Approve: Restart the model server?", "PRACTICE · SIMULATION", "nothing real is touched",
                    "A simulated restart: nothing real is restarted."] {
         has(&s, needle);
     }
@@ -295,7 +295,9 @@ fn the_overview_guides_the_operator_from_the_servers_stage() {
 
 #[test]
 fn a_practice_overview_shows_simulated_values_and_no_real_safety_state() {
-    let s = screen(&practicing("healthy"));
+    let mut p = practicing("healthy");
+    p.details = true;                                   // the technical view carries the safety section
+    let s = screen(&p);
     for needle in ["simulated session", "sim/opt-125m", "Simulated session: there is nothing real to protect.",
                    "AUDIT ✓ VERIFIED (8 events, simulated)"] {
         has(&s, needle);
@@ -332,9 +334,17 @@ fn the_footer_offers_practice_and_its_own_keys() {
 #[test]
 fn the_real_overview_with_nothing_wrong_points_at_practice() {
     let s = screen(&real_app());
-    has(&s, "No active incidents");
-    has(&s, "Press P to practice an incident (simulated; nothing real is touched)");
-    lacks(&screen(&practicing("healthy")), "Press P to practice an incident");
+    has(&s, "Nothing right now");
+    has(&s, "P  Practice an incident");
+    lacks(&screen(&practicing("healthy")), "P  Practice an incident");
+    // the technical view says the same
+    let mut tech = real_app();
+    tech.details = true;
+    has(&screen(&tech), "No active incidents");
+    has(&screen(&tech), "Press P to practice an incident (simulated; nothing real is touched)");
+    tech.apply(Msg::Loaded(Loaded::PracticeStarted(Ok(()))));
+    tech.apply(Msg::Poll(Ok(practice_snapshot("healthy", vec![]))));
+    lacks(&screen(&tech), "Press P to practice an incident");
 }
 
 #[test]

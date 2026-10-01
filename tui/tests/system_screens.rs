@@ -21,6 +21,7 @@ fn code(k: KeyCode) -> KeyEvent {
 fn app() -> App {
     let mut a = App::new("http://127.0.0.1:8080".into());
     a.wall = 1_790_866_932.0;
+    a.details = true;                       // these tests cover the technical views
     a.client = ClientInfo { interval_ms: Some(750), timeout_ms: Some(2000) };
     let st: Status = serde_json::from_str(HEALTHY).unwrap();
     a.apply(Msg::Poll(Ok(Snapshot::new(st, vec![]))));
@@ -448,6 +449,7 @@ fn with_workload(state: Option<&str>, observation: bool) -> App {
     }
     let mut a = App::new("http://127.0.0.1:8080".into());
     a.wall = 1_790_866_932.0;
+    a.details = true;                       // the technical view (the plain one is tested in plain_views.rs)
     a.apply(Msg::Poll(Ok(Snapshot::new(st, vec![]))));
     a
 }

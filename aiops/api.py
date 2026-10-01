@@ -60,8 +60,12 @@ class _Views:
                                    or e["data"].get("reason")}
                 elif e["event"] == "verification_finished":
                     checks = e["data"].get("checks")
+        verification = {"checks": checks}
+        required = self.engine.config.get("stable_probes")
+        if required is not None:           # how many completions in a row recovery must show (if known)
+            verification["required_completions"] = required
         return {**self.view(incident), "rca": rca, "remediation": remediation,
-                "verification": {"checks": checks}}
+                "verification": verification}
 
     def audit_view(self, query):
         raw = parse_qs(query).get("limit", [str(AUDIT_DEFAULT_LIMIT)])[0]

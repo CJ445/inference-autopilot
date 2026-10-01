@@ -44,6 +44,9 @@ def test_aiops_opens_with_no_workload_and_follows_it_as_the_operator_starts_and_
         try:
             # -- zero workloads: the control plane starts and the TUI opens ----------------------
             assert t.wait_screen("● CONTROL ONLINE", timeout=120)
+            assert t.wait_screen("No workload connected")             # the plain default: a valid, calm state
+            assert t.wait_screen("waiting for an operator-managed inference workload")
+            t.send(b"d")                                              # the technical view for the rest
             assert t.wait_screen("○ NO WORKLOAD") and t.wait_screen("No workload running")
             assert "Probe" not in t.vs.text() and "✗ UNRESPONSIVE" not in t.vs.text()
             assert lifecycle.is_running(lifecycle.read_state(c.state))
