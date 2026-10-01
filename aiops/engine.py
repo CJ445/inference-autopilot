@@ -10,8 +10,17 @@ from aiops.verify import real_verifier
 CLOSED = {"RESOLVED", "UNRESOLVED", "EXECUTION_FAILED", "REJECTED", "CLEARED"}
 
 
+# A workload is "held" while an incident has a proposal waiting or a remediation running.
+INFLIGHT = {"APPROVED", "EXECUTING", "VERIFYING"}
+HOLDING = {"PROPOSED", "POLICY_CHECK"} | INFLIGHT
+
+
 class NothingToApprove(Exception):
     pass
+
+
+class WorkloadBusy(Exception):
+    """Another incident holds this workload; at most one remediation per workload (PRD §130)."""
 
 
 class Engine:
@@ -66,6 +75,12 @@ class Engine:
         if category is None:
             return None
 
+        holder = self._holder()
+        if holder and holder.category != category:
+            # a second condition on a held workload never opens a second incident or proposal
+            self._note_suppressed(holder, category)
+            return holder
+
         active = self._active(self.config["service"], category)
         if active:
             if active.status == "INSUFFICIENT_EVIDENCE":
@@ -107,10 +122,33 @@ class Engine:
 
         self._persist_or_rollback(snapshot, undo)
 
+    def _holder(self):
+        return next((i for i in self.incidents
+                     if i.service == self.config["service"] and i.status in HOLDING), None)
+
+    def _note_suppressed(self, holder, category):
+        data = {"incident_id": holder.incident_id, "category": category}
+        if any(e["event"] == "condition_suppressed" and e["data"] == data
+               for e in self.audit.events):
+            return  # visible once, never spammed
+        snapshot = self._snapshot()
+        self.audit.append("condition_suppressed", data)
+        self._persist_or_rollback(snapshot)
+
+    def _conflicts(self, incident, workload):
+        """Other incidents that make a restart of this workload ambiguous or unsafe."""
+        return [i for i in self.incidents
+                if i.incident_id != incident.incident_id and (
+                    (i.service == incident.service and i.status in INFLIGHT)
+                    or (i.incident_id in self.pending and
+                        self.pending[i.incident_id]["parameters"]["workload"] == workload))]
+
     def approve(self, incident_id):
         if incident_id not in self.pending:
             raise NothingToApprove(incident_id)
         incident = self.get(incident_id)
+        if self._conflicts(incident, self.pending[incident_id]["parameters"]["workload"]):
+            raise WorkloadBusy(incident_id)  # fail closed: nothing is consumed or changed
         c = self.config
         snapshot = self._snapshot()
         proposal = self.pending.pop(incident_id)

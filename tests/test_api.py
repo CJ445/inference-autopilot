@@ -135,3 +135,14 @@ def test_persistence_outage_is_a_503_dependency_error_and_changes_nothing(tmp_pa
     assert status == 503 and body["error"]["code"] == "DEPENDENCY_ERROR"
     assert "readonly" not in json.dumps(body).lower()  # no internals
     assert w.restarts == 0
+
+
+def test_a_busy_workload_is_a_409_policy_denied_and_changes_nothing(api):
+    from test_engine_real import inject
+
+    base, engine, w = api
+    inc = engine.tick()
+    inject(engine, "inc_900", "EXECUTING", pending=False, workload="vllm-0")
+    status, body = call(base, f"/api/v1/incidents/{inc.incident_id}/remediation/approve", "POST")
+    assert status == 409 and body["error"]["code"] == "POLICY_DENIED"
+    assert w.restarts == 0

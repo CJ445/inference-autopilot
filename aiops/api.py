@@ -5,7 +5,7 @@ import traceback
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from aiops.engine import NothingToApprove
+from aiops.engine import NothingToApprove, WorkloadBusy
 from aiops.store import StoreUnavailable
 
 ROUTE = re.compile(
@@ -62,6 +62,9 @@ def make_server(engine, host="127.0.0.1", port=8080, lock=None):
             except NothingToApprove:
                 return self._error(409, "POLICY_DENIED",
                                    "No pending remediation for this incident.")
+            except WorkloadBusy:
+                return self._error(409, "POLICY_DENIED",
+                                   "Another remediation holds this workload.")
             self._send(200, view(incident))
 
         def _error(self, status, code, message):

@@ -7,11 +7,13 @@ from aiops.docker import DockerProvider
 from aiops.kubectl import ClusterError
 
 MANAGED = {"com.inference-autopilot.managed": "true", "com.inference-autopilot.workload": "vllm"}
+SHORT = "0123456789ab"                 # what `docker ps --format {{.ID}}` prints
+FULL = SHORT + "c" * 52                # what `docker inspect` reports as Id (64 hex)
 PS = ["docker", "ps", "-a", "--filter", "label=com.inference-autopilot.managed=true",
       "--filter", "label=com.inference-autopilot.workload=vllm", "--format", "{{.ID}}"]
 
 
-def inspect_json(cid="abc123", started="2026-10-01T10:00:00Z", running=True, health="healthy",
+def inspect_json(cid=FULL, started="2026-10-01T10:00:00Z", running=True, health="healthy",
                  labels=MANAGED):
     state = {"Running": running, "Status": "running" if running else "exited",
              "StartedAt": started}
@@ -23,7 +25,7 @@ def inspect_json(cid="abc123", started="2026-10-01T10:00:00Z", running=True, hea
 class Docker:
     """Records argv and answers from a table; fails the test on anything unexpected."""
 
-    def __init__(self, ids="abc123\n", inspect=None, fail=None):
+    def __init__(self, ids=SHORT + "\n", inspect=None, fail=None):
         self.calls, self.ids = [], ids
         self.inspect = inspect if inspect is not None else inspect_json()
         self.fail = fail
@@ -41,7 +43,7 @@ class Docker:
         elif argv[:2] == ["docker", "inspect"]:
             r.stdout = self.inspect
         elif argv[:2] == ["docker", "restart"]:
-            r.stdout = "abc123\n"
+            r.stdout = FULL + "\n"
         else:
             raise AssertionError(f"unexpected docker command: {argv}")
         return r
@@ -50,21 +52,25 @@ class Docker:
         return [c[0][1] for c in self.calls]
 
 
+def provider(d, workload="vllm"):
+    return DockerProvider(workload, run=d)
+
+
 def test_workload_is_resolved_by_project_labels_with_fixed_argv():
     d = Docker()
-    DockerProvider(run=d).get_workload("vllm")
+    provider(d).get_workload("vllm")
     assert d.calls[0][0] == PS
     assert not any(kw.get("shell") for _, kw in d.calls)
 
 
 def test_lifecycle_id_combines_container_id_and_started_at():
-    p = DockerProvider(run=Docker(inspect=inspect_json(cid="abc123", started="T1")))
-    assert p.get_workload("vllm")["id"] == "abc123:T1"
+    p = provider(Docker(inspect=inspect_json(cid=FULL, started="T1")))
+    assert p.get_workload("vllm")["id"] == f"{FULL}:T1"
 
 
 def test_docker_restart_keeps_container_id_so_started_at_must_change_the_identity():
-    before = DockerProvider(run=Docker(inspect=inspect_json(started="T1"))).get_workload("vllm")
-    after = DockerProvider(run=Docker(inspect=inspect_json(started="T2"))).get_workload("vllm")
+    before = provider(Docker(inspect=inspect_json(started="T1"))).get_workload("vllm")
+    after = provider(Docker(inspect=inspect_json(started="T2"))).get_workload("vllm")
     assert before["id"] != after["id"]
 
 
@@ -76,28 +82,28 @@ def test_docker_restart_keeps_container_id_so_started_at_must_change_the_identit
     ({"running": False, "health": None}, False),
 ])
 def test_ready_requires_running_and_healthy_when_a_healthcheck_exists(kwargs, ready):
-    assert DockerProvider(run=Docker(inspect=inspect_json(**kwargs))).get_workload("vllm")[
+    assert provider(Docker(inspect=inspect_json(**kwargs))).get_workload("vllm")[
         "ready"] is ready
 
 
-def test_restart_is_a_single_fixed_docker_restart_of_the_resolved_container():
+def test_restart_targets_the_full_container_id_with_one_fixed_docker_restart():
     d = Docker()
-    assert DockerProvider(run=d).restart_workload("vllm") == "ok"
+    assert provider(d).restart_workload("vllm") == "ok"
     restart = [c for c, _ in d.calls if c[1] == "restart"]
-    assert restart == [["docker", "restart", "-t", "30", "abc123"]]
+    assert restart == [["docker", "restart", "-t", "30", FULL]]
 
 
 def test_unmanaged_workload_is_rejected_and_nothing_is_restarted():
     d = Docker(ids="")
     with pytest.raises(ClusterError, match="no managed workload"):
-        DockerProvider(run=d).restart_workload("vllm")
+        provider(d).restart_workload("vllm")
     assert "restart" not in d.verbs()
 
 
 def test_ambiguous_workload_is_rejected_and_nothing_is_restarted():
-    d = Docker(ids="abc123\ndef456\n")
+    d = Docker(ids=SHORT + "\n" + "ba9876543210\n")
     with pytest.raises(ClusterError, match="ambiguous"):
-        DockerProvider(run=d).restart_workload("vllm")
+        provider(d).restart_workload("vllm")
     assert "restart" not in d.verbs()
 
 
@@ -109,15 +115,15 @@ def test_ambiguous_workload_is_rejected_and_nothing_is_restarted():
 def test_labels_are_rechecked_after_inspect_and_a_mismatch_fails_closed(labels):
     d = Docker(inspect=inspect_json(labels=labels))
     with pytest.raises(ClusterError, match="labels"):
-        DockerProvider(run=d).restart_workload("vllm")
+        provider(d).restart_workload("vllm")
     assert "restart" not in d.verbs()
 
 
-@pytest.mark.parametrize("bad", ["not json", "[]", "[{}]", json.dumps([{"Id": "x"}])])
+@pytest.mark.parametrize("bad", ["not json", "[]", "[{}]", json.dumps([{"Id": FULL}])])
 def test_unexpected_inspect_output_fails_closed(bad):
     d = Docker(inspect=bad)
     with pytest.raises(ClusterError):
-        DockerProvider(run=d).restart_workload("vllm")
+        provider(d).restart_workload("vllm")
     assert "restart" not in d.verbs()
 
 
@@ -128,9 +134,9 @@ def test_unexpected_inspect_output_fails_closed(bad):
 ])
 def test_docker_unavailable_fails_closed(error):
     with pytest.raises(ClusterError):
-        DockerProvider(run=Docker(fail=error)).get_workload("vllm")
+        provider(Docker(fail=error)).get_workload("vllm")
     with pytest.raises(ClusterError):
-        DockerProvider(run=Docker(fail=error)).restart_workload("vllm")
+        provider(Docker(fail=error)).restart_workload("vllm")
 
 
 @pytest.mark.parametrize("name", ["vllm; rm -rf /", "$(reboot)", "a b", "", "VLLM", "x" * 100,
@@ -138,10 +144,46 @@ def test_docker_unavailable_fails_closed(error):
 def test_invalid_workload_names_never_reach_docker(name):
     d = Docker()
     with pytest.raises(ClusterError):
-        DockerProvider(run=d).restart_workload(name)
+        provider(d).restart_workload(name)
     assert d.calls == []
 
 
 def test_provider_exposes_no_generic_docker_interface():
     public = {n for n in dir(DockerProvider) if not n.startswith("_")}
     assert public == {"get_workload", "restart_workload"}
+
+
+# --- identity hardening: only the explicitly configured workload, only well-formed IDs ----
+
+def test_provider_is_bound_to_one_workload_and_refuses_any_other_name_without_docker_calls():
+    d = Docker()
+    p = provider(d, workload="vllm")
+    for call in (p.get_workload, p.restart_workload):
+        with pytest.raises(ClusterError, match="not the configured workload"):
+            call("other")           # a valid name, even if a managed "other" container exists
+    assert d.calls == []
+
+
+@pytest.mark.parametrize("workload", ["", "VLLM", "vllm; reboot", "-x", None])
+def test_provider_cannot_be_constructed_without_a_valid_workload(workload):
+    with pytest.raises((ClusterError, TypeError)):
+        DockerProvider(workload, run=Docker())
+
+
+@pytest.mark.parametrize("ps_output", [
+    "--privileged\n", "abc;rm\n", "0123456789AB\n", "0123\n", "0123456789ab extra\n",
+    "-rf0123456789\n",
+])
+def test_malformed_container_ids_from_docker_fail_closed(ps_output):
+    d = Docker(ids=ps_output)
+    with pytest.raises(ClusterError):
+        provider(d).restart_workload("vllm")
+    assert d.verbs().count("restart") == 0 and "inspect" not in d.verbs()
+
+
+@pytest.mark.parametrize("full_id", ["f" * 64, "tooshort", SHORT, FULL.upper(), FULL + "0"])
+def test_inspect_reporting_a_different_or_malformed_container_fails_closed(full_id):
+    d = Docker(inspect=inspect_json(cid=full_id))
+    with pytest.raises(ClusterError, match="identity"):
+        provider(d).restart_workload("vllm")
+    assert "restart" not in d.verbs()

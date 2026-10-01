@@ -144,3 +144,62 @@ def test_aborted_requests_are_not_counted_as_successes(server):
         'finished_reason="abort",model_name="facebook/opt-125m"} 3.0')
     m = client(server).metrics()
     assert m["vllm_requests_succeeded_total"] == 1.0 and m["vllm_requests_aborted_total"] == 3.0
+
+
+# --- malformed HTTP must be a failed probe / telemetry error, never an exception ----------
+
+import socket  # noqa: E402
+
+
+class RawServer:
+    """Answers every connection with fixed bytes, then closes: a broken or truncated server."""
+
+    def __init__(self, payload):
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(5)
+        self.url = f"http://127.0.0.1:{self.sock.getsockname()[1]}"
+        self.payload = payload
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            try:
+                conn.recv(65536)
+                conn.sendall(self.payload)
+            finally:
+                conn.close()
+
+    def close(self):
+        self.sock.close()
+
+
+BROKEN = {
+    "not http at all": b"garbage that is not http\r\n\r\n",
+    "truncated body": b"HTTP/1.1 200 OK\r\nContent-Length: 500\r\n\r\nshort",
+    "closed without answering": b"",
+}
+
+
+@pytest.mark.parametrize("name", list(BROKEN))
+def test_probe_treats_a_malformed_http_response_as_a_failed_probe(name):
+    s = RawServer(BROKEN[name])
+    try:
+        p = VllmClient(s.url, "m", timeout=2).probe()
+    finally:
+        s.close()
+    assert p["ok"] is False and p["error"]
+
+
+@pytest.mark.parametrize("name", list(BROKEN))
+def test_metrics_treats_a_malformed_http_response_as_a_telemetry_error(name):
+    s = RawServer(BROKEN[name])
+    try:
+        with pytest.raises(TelemetryError):
+            VllmClient(s.url, "m", timeout=2).metrics()
+    finally:
+        s.close()

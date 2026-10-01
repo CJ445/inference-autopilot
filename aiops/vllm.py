@@ -1,4 +1,5 @@
 """Read vLLM's real /metrics and probe real inference. Never invents a value."""
+import http.client
 import json
 import re
 import time
@@ -42,7 +43,7 @@ class VllmClient:
         try:
             with urllib.request.urlopen(self.base_url + "/metrics", timeout=self.timeout) as r:
                 samples = parse_metrics(r.read().decode())
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, http.client.HTTPException) as e:
             raise TelemetryError(f"vllm metrics unavailable: {e}") from e
         out = {}
         for key, family in METRICS.items():
@@ -80,6 +81,8 @@ class VllmClient:
             error = "timeout"
         except (ValueError, KeyError, IndexError, TypeError):
             error = "bad response: no completion in body"
+        except http.client.HTTPException:
+            error = "bad response: malformed http"
         except OSError as e:
             error = f"unreachable: {e}"
         return {"ok": error is None, "latency_ms": (time.monotonic() - start) * 1000,

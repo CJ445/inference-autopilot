@@ -259,3 +259,118 @@ def test_pressure_incident_also_requires_memory_to_have_dropped():
     r.engine.approve(inc.incident_id)
     assert inc.status == "UNRESOLVED"
     assert verification_checks(r.engine)["gpu_memory_below_threshold"] is False
+
+
+# --- one remediation per workload (PRD §130): deterministic and fail closed ---------------
+
+from aiops.engine import WorkloadBusy  # noqa: E402
+from aiops.incident import Incident  # noqa: E402
+
+
+def suppressed(engine):
+    return [e["data"] for e in engine.audit.events if e["event"] == "condition_suppressed"]
+
+
+def test_pressure_arriving_while_an_unresponsive_incident_holds_the_workload_opens_nothing():
+    r = Rig(memory_bytes=2.9e9)
+    r.fail_probe()
+    first = r.engine.tick()
+    assert first.category == "INFERENCE_UNRESPONSIVE" and first.status == "POLICY_CHECK"
+
+    r.memory = 5.2e9   # pressure appears on top of the hang
+    for _ in range(4):
+        assert r.engine.tick() is first          # the holder; no second incident
+    assert len(r.engine.incidents) == 1
+    assert list(r.engine.pending) == [first.incident_id]
+    assert suppressed(r.engine) == [{"incident_id": first.incident_id,
+                                     "category": "GPU_MEMORY_PRESSURE"}]  # noted once only
+    assert r.engine.audit.verify() and r.cluster.restarts == 0
+
+
+def test_unresponsive_arriving_while_a_pressure_incident_holds_the_workload_opens_nothing():
+    r = Rig(memory_bytes=5.2e9)
+    r.fail_probe()
+    first = r.engine.tick()
+    assert first.category == "GPU_MEMORY_PRESSURE" and first.status == "POLICY_CHECK"
+
+    r.memory = 2.9e9   # pressure subsides but the workload is still hung
+    assert r.engine.tick() is first and len(r.engine.incidents) == 1
+    assert list(r.engine.pending) == [first.incident_id]
+    assert suppressed(r.engine) == [{"incident_id": first.incident_id,
+                                     "category": "INFERENCE_UNRESPONSIVE"}]
+
+
+@pytest.mark.parametrize("release", ["reject", "resolve"])
+def test_the_workload_is_released_when_the_holder_closes(release):
+    r = approved_rig()                       # hung workload, restart will recover it
+    first = r.engine.tick()
+    getattr(r.engine, "approve" if release == "resolve" else "reject")(first.incident_id)
+    assert first.status in ("RESOLVED", "REJECTED")
+
+    r.fail_probe()                           # the condition returns
+    second = r.engine.tick()
+    assert second is not first and second.incident_id == "inc_002"
+    assert list(r.engine.pending) == [second.incident_id]
+
+
+def inject(engine, incident_id, status, pending=True, workload="vllm"):
+    """Put the engine in a state tick() can never create, to prove approve() fails closed."""
+    inc = Incident.from_dict({"incident_id": incident_id, "service": "vllm",
+                              "category": "INFERENCE_UNRESPONSIVE", "status": status,
+                              "evidence": [], "timeline": []})
+    engine.incidents.append(inc)
+    if pending:
+        engine.pending[incident_id] = {"action": "restart_workload",
+                                       "parameters": {"workload": workload}}
+    return inc
+
+
+def test_approve_refuses_while_another_incident_is_executing_the_same_workload():
+    r = approved_rig()
+    first = r.engine.tick()
+    inject(r.engine, "inc_900", "EXECUTING", pending=False)
+    events = len(r.engine.audit.events)
+    with pytest.raises(WorkloadBusy):
+        r.engine.approve(first.incident_id)
+    assert r.cluster.restarts == 0 and first.status == "POLICY_CHECK"
+    assert first.incident_id in r.engine.pending and len(r.engine.audit.events) == events
+
+
+def test_two_pending_proposals_for_one_workload_block_both_approvals_but_not_rejection():
+    r = approved_rig()
+    first = r.engine.tick()
+    second = inject(r.engine, "inc_900", "POLICY_CHECK")
+    for incident in (first, second):
+        with pytest.raises(WorkloadBusy):
+            r.engine.approve(incident.incident_id)
+    assert r.cluster.restarts == 0
+
+    r.engine.reject(second.incident_id)      # the operator's way out: no mutation involved
+    r.engine.approve(first.incident_id)
+    assert first.status == "RESOLVED" and r.cluster.restarts == 1
+
+
+def test_a_proposal_for_a_different_workload_does_not_block_approval():
+    r = approved_rig()
+    first = r.engine.tick()
+    inject(r.engine, "inc_900", "POLICY_CHECK", workload="some-other-workload")
+    r.engine.approve(first.incident_id)
+    assert first.status == "RESOLVED"
+
+
+def test_unexpected_verification_crash_on_the_real_path_is_unresolved_not_stuck():
+    r = approved_rig()
+
+    class Crashing(RecoveringCluster):
+        def get_workload(self, name):
+            if self.restarts:
+                raise RuntimeError("provider exploded")
+            return super().get_workload(name)
+
+    r.cluster = Crashing(r)
+    r.engine = Engine(r.telemetry, r.cluster, {**CONFIG, "stable_probes": 3,
+                                                "probe_interval": 0})
+    inc = r.engine.tick()
+    r.engine.approve(inc.incident_id)
+    assert inc.status == "UNRESOLVED"
+    assert verification_checks(r.engine) == {"verification_error": False}

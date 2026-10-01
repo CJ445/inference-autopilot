@@ -1,5 +1,8 @@
+import pytest
+
 from aiops.audit import AuditLog
 from aiops.incident import Incident
+from aiops.kubectl import ClusterError
 from aiops.remediate import remediate
 
 PROPOSAL = {"action": "restart_workload", "parameters": {"workload": "vllm-0"}}
@@ -219,3 +222,66 @@ def test_execute_signals_executing_before_it_mutates_anything():
     execute(inc, proposal, cluster, audit, LIMITS, timeout=1, interval=0.01,
             on_executing=lambda: seen.append((inc.status, cluster.restarts)))
     assert seen == [("EXECUTING", 0)]
+
+
+# --- verification and execution must fail closed ---------------------------------------
+
+from aiops.remediate import execute, propose  # noqa: E402
+
+
+def run_execute(verify=None, cluster=None):
+    inc, audit = diagnosed(), AuditLog()
+    proposal = propose(inc, PROPOSAL, audit)
+    execute(inc, proposal, cluster or Cluster(), audit, LIMITS, timeout=0.1, interval=0.01,
+            verify=verify)
+    return inc, audit
+
+
+def last_checks(audit):
+    return next(e["data"]["checks"] for e in reversed(audit.events)
+                if e["event"] == "verification_finished")
+
+
+@pytest.mark.parametrize("error", [RuntimeError("boom"), KeyError("id"), TypeError("x"),
+                                   ValueError("y")])
+def test_a_verifier_that_crashes_leaves_the_incident_unresolved_not_stuck(error):
+    def crashing(workload, id_before):
+        raise error
+
+    inc, audit = run_execute(verify=crashing)
+    assert inc.status == "UNRESOLVED"
+    assert last_checks(audit) == {"verification_error": False}
+
+
+@pytest.mark.parametrize("checks", [{}, None, {"a": 1}, {"a": "yes"}, {"a": True, "b": 1},
+                                    {"a": True, "b": None}])
+def test_empty_or_non_boolean_verification_results_never_resolve(checks):
+    inc, _ = run_execute(verify=lambda w, b: checks)
+    assert inc.status == "UNRESOLVED"
+
+
+def test_only_strictly_true_checks_resolve():
+    inc, _ = run_execute(verify=lambda w, b: {"a": True, "b": True})
+    assert inc.status == "RESOLVED"
+
+
+@pytest.mark.parametrize("error", [ClusterError("docker restart failed"), RuntimeError("boom")])
+def test_a_restart_that_raises_closes_the_incident_as_failed_without_verifying(error):
+    class Failing(Cluster):
+        def restart_workload(self, name):
+            raise error
+
+    verified = []
+    inc, audit = run_execute(verify=lambda w, b: verified.append(1) or {"a": True},
+                             cluster=Failing())
+    assert inc.status == "EXECUTION_FAILED" and verified == []
+    assert audit.events[-1]["event"] == "remediation_failed" and audit.verify()
+
+
+def test_the_default_stand_in_verifier_also_refuses_empty_or_partial_success():
+    class Silent(Cluster):
+        def metrics(self):
+            return {"gpu_memory_used_bytes": 4_000_000_000, "error_rate": 0.0}
+
+    inc, _ = run_execute(cluster=Silent())
+    assert inc.status == "RESOLVED"   # a complete, genuinely passing check set still resolves

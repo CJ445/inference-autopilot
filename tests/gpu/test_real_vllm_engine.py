@@ -107,10 +107,10 @@ def test_observation_comes_from_the_real_gpu_and_real_vllm(vllm):
 
 def test_pressure_with_healthy_inference_is_insufficient_then_a_hung_workload_is_diagnosed(
         vllm, tmp_path):
-    engine = Engine(telemetry(), DockerProvider(), {
+    engine = Engine(telemetry(), DockerProvider("vllm"), {
         "service": "vllm", "workload": "vllm", "gpu_threshold": THRESHOLD,
         "error_rate_limit": 0.05})
-    provider = DockerProvider()
+    provider = DockerProvider("vllm")
     id_before = provider.get_workload("vllm")["id"]
 
     result = {}
@@ -151,7 +151,7 @@ def test_pressure_with_healthy_inference_is_insufficient_then_a_hung_workload_is
 
 
 def test_paused_vllm_is_diagnosed_approved_restarted_and_verified_by_real_inference(vllm):
-    provider = DockerProvider()
+    provider = DockerProvider("vllm")
     engine = Engine(telemetry(), provider, {
         "service": "vllm", "workload": "vllm", "gpu_threshold": THRESHOLD,
         "timeout": 150, "interval": 2, "stable_probes": 3, "probe_interval": 1.0})
@@ -192,3 +192,39 @@ def test_paused_vllm_is_diagnosed_approved_restarted_and_verified_by_real_infere
     print("\nE2E timeline:", [t["state"] for t in inc.timeline])
     print("E2E audit:", [e["event"] for e in engine.audit.events])
     print("E2E checks:", checks)
+
+
+def test_real_pressure_on_top_of_a_held_hang_opens_no_second_incident_or_proposal(vllm, tmp_path):
+    provider = DockerProvider("vllm")
+    engine = Engine(telemetry(), provider, {
+        "service": "vllm", "workload": "vllm", "gpu_threshold": THRESHOLD,
+        "timeout": 150, "interval": 2})
+    id_before = provider.get_workload("vllm")["id"]
+    result = {}
+    stressor = threading.Thread(
+        target=lambda: result.update(run_gpu_pressure(2048, 45, tmp_path / "r.json")))
+    try:
+        docker("pause", NAME)                                   # the hang comes first
+        inc = engine.tick()
+        assert inc.category == "INFERENCE_UNRESPONSIVE" and inc.status == "POLICY_CHECK"
+
+        stressor.start()                                        # then real memory pressure
+        deadline = time.monotonic() + 90
+        while read_gpu()["gpu_memory_used_bytes"] <= THRESHOLD:
+            assert time.monotonic() < deadline, "stressor never raised memory above threshold"
+            time.sleep(0.5)
+
+        for _ in range(2):
+            assert engine.tick() is inc                         # the holder, nothing new
+        assert len(engine.incidents) == 1 and list(engine.pending) == [inc.incident_id]
+        assert [e["data"]["category"] for e in engine.audit.events
+                if e["event"] == "condition_suppressed"] == ["GPU_MEMORY_PRESSURE"]
+        assert provider.get_workload("vllm")["id"] == id_before
+    finally:
+        docker("unpause", NAME, check_rc=False)
+        stressor.join(timeout=120)
+
+    engine.reject(inc.incident_id)                              # operator declines
+    assert inc.status == "REJECTED" and engine.pending == {}
+    assert provider.get_workload("vllm")["id"] == id_before     # no restart ever happened
+    assert result["outcome"] == "COMPLETED" and engine.audit.verify()

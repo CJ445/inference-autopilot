@@ -39,14 +39,19 @@ def execute(incident, proposal, cluster, audit, limits, timeout=60, interval=2,
         incident.transition("EXECUTION_FAILED")
         return
     audit.append("remediation_started", {"action": proposal["action"], "workload": workload})
-    result = cluster.restart_workload(workload)
+    try:
+        result = cluster.restart_workload(workload)
+    except Exception as e:  # the outcome is unknown: close as failed, never verify or resolve
+        audit.append("remediation_failed", {"workload": workload, "error": str(e)[:300]})
+        incident.transition("EXECUTION_FAILED")
+        return
     audit.append("remediation_finished", {"api_result": result})
 
     incident.transition("VERIFYING")
     verify = verify or (lambda w, b: _verify(cluster, w, b, limits))
     checks = _verify_until(verify, workload, before, timeout, interval)
     audit.append("verification_finished", {"checks": checks})
-    incident.transition("RESOLVED" if all(checks.values()) else "UNRESOLVED")
+    incident.transition("RESOLVED" if _passed(checks) else "UNRESOLVED")
 
 
 def remediate(incident, proposal, cluster, approved, audit, limits, timeout=60, interval=2):
@@ -55,12 +60,20 @@ def remediate(incident, proposal, cluster, approved, audit, limits, timeout=60, 
         execute(incident, proposal, cluster, audit, limits, timeout, interval)
 
 
+def _passed(checks):
+    """Fail closed: resolved only by a non-empty set of checks that are ALL exactly True."""
+    return isinstance(checks, dict) and bool(checks) and all(v is True for v in checks.values())
+
+
 def _verify_until(verify, workload, id_before, timeout, interval):
     """Poll until recovery is observed or the timeout expires; return the last checks."""
     deadline = time.monotonic() + timeout
     while True:
-        checks = verify(workload, id_before)
-        if all(checks.values()) or time.monotonic() >= deadline:
+        try:
+            checks = verify(workload, id_before)
+        except Exception:  # a crashing verifier is a failed verification, not a stuck incident
+            checks = {"verification_error": False}
+        if _passed(checks) or time.monotonic() >= deadline:
             return checks
         time.sleep(interval)
 
