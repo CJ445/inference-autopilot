@@ -315,3 +315,45 @@ dedicated error code would be cleaner but is an API change, and this phase does 
   and so failed whenever the operator had their own TUI open (the earlier unexplained flake); it now
   checks only the process it started. `scripts/clean_machine_check.sh` likewise only looks for
   processes of its own throwaway directory.
+
+## D-16: The TUI as a terminal application: a stream, an anchored bar, a context panel (Phase 9)
+
+*Brief:* not "the old TUI with new colours": an application one operates from inside the terminal.
+*Study:* OpenCode's actual TUI (`packages/tui/src`), read for its interaction model, not its palette.
+
+**What OpenCode's code shows (and the pattern I take from each).**
+
+| Source | What it does | What I take |
+|---|---|---|
+| `routes/session/index.tsx` | The workspace is a chronological *transcript*: a `scrollbox` with `stickyScroll` to the bottom, blocks appended as things happen, 2-column padding, a blank row between blocks, a left bar per block | The recovery loop is a stream of stage blocks that appear as the server reports them; the view sticks to the newest |
+| `component/prompt`, `routes/session/permission.tsx` | One *anchored action surface* at the bottom. It morphs: input, permission request (panel, left bar in the variant colour, an action row on a raised tone), reject-with-reason. The question is asked where the cursor already is | An anchored **bar** that always says what to do next in a sentence and morphs with the situation |
+| `routes/session/footer.tsx` | One muted line: context on the left, small coloured dots with counts on the right (`• 3 LSP`, `△ 1 Permission`) | A quiet footer: the keys that work now on the left, status dots on the right |
+| `routes/session/sidebar.tsx` | A 42-column panel on `backgroundPanel`, toggleable, an overlay when narrow; it holds *context about the subject*, never the main content | A **workload panel** (the model, the GPU, the probe) at the right, secondary, toggled with a key |
+| `routes/home.tsx` | Home is calm: a centred composition around the single action surface. No widgets | Home is a narrative, not a grid of metrics |
+| `component/command-palette.tsx`, `ui/dialog-select.tsx` | Every action is a registered command with a title, a category and a shortcut; the palette shows a *Suggested* group first (contextual), categories, the shortcut right-aligned, a filter; the selected row is a filled bar | A palette built the same way, with contextual suggestions |
+| `ui/dialog.tsx` | A dimmed backdrop (black at alpha 150), a panel at one quarter of the height, no border, fixed widths 60/88/116 | Overlays are tonal panels over a dimmed screen |
+| `ui/toast.tsx` | A panel top-right with a coloured left and right bar per variant; auto-dismisses | Notices are toasts, not a line in the footer |
+| `component/spinner.tsx` | A braille spinner with muted text for work in progress; animations can be turned off and it falls back to `⋯` | The active stage shows a spinner; reduced motion falls back to `⋯` |
+| `ui/border.ts` | The only border in the app is the left `┃` | One emphasis device |
+| `context/theme.tsx`, `theme/index.ts` | A tonal ladder (background, panel, element); a "system" theme that derives its greys from the terminal | Tonal surfaces; the existing ANSI theme stays as the terminal-native fallback |
+
+**The ten questions, answered.**
+
+1. *Primary workspace?* The **stream**: the recovery loop as it happens, newest at the bottom, in the main region of every space.
+2. *Primary loop?* Observe, detect, diagnose, propose, approve, recover, verify. It is the visual spine: one block per stage, appended only when the server reports it.
+3. *Always visible?* The header (wordmark, the space you are in, the mode badge `SIMULATION` or `LIVE · GPU-REAL`, the connection), the anchored bar, the footer with its status dots.
+4. *Appears contextually?* The anchored bar's content, the footer's keys, toasts, the evidence under a block, the workload panel on a wide terminal.
+5. *In an overlay?* The command palette, the decision, the real-fault confirmation, the refusal, Help, the stop confirmation.
+6. *Disappears when you move away?* The anchored bar's message and the footer's keys belong to the space; toasts fade (an error waits for a key); an expanded block collapses.
+7. *Persistent spatial position?* Wordmark top-left, mode badge top-right, bar at the bottom, status dots bottom-right, the workload panel at the right.
+8. *Progressively disclosed?* Finished stages collapse to one line; the active one shows its detail; `E` expands the evidence; `D` switches to the technical view (the existing global toggle).
+9. *How a recovery test feels like an experience?* The Lab runs it as a live session in the same stream: the spine builds as the server reports each stage, the active stage has a spinner, the bar tells you what it needs, and it ends with a resolved block and "run again".
+10. *How the user knows what to do next?* The anchored bar says it in a sentence with the key, in every situation (idle: "Run a recovery test to watch Autopilot work", waiting: "Autopilot needs your decision", and so on). It is the equivalent of OpenCode's prompt placeholder.
+
+**One component, three places.** The incident stream (the loop for one incident, real or a test) is drawn by one function and used by Home (when something is open), the incident page and the Lab. This replaces three separate renderings (the Home rows, the detail page, the Lab story). The five spaces keep the same shell, so moving between them changes the main region and nothing else.
+
+**Identity, not a clone.** OpenCode's neutral greys and peach accent are not used. The tonal ladder is cool and slightly blue (infrastructure, calm), the accent is a teal "signal" colour (inference, autonomy), amber is reserved for "needs you", and the signature is the **spine**: a vertical loop line of stages that fills in as the system works. No OpenCode name, wordmark or product concept is used.
+
+**Honest limits.** Ratatui has no alpha blending: the backdrop is approximated by blending each cell toward black (truecolor) or by the DIM attribute (ANSI). It cannot query the terminal's background colour, so the tonal theme paints its own; the ANSI theme stays terminal-native and loses the tonal surfaces, keeping the left bar, the spacing and the glyphs. The spinner is driven by the event loop's 100 ms tick. Verification progress ("completion 1 / 3") is not reported by the server while it runs, so it is not shown: only the recorded checks, when they exist.
+
+**Contrast (computed, not eyeballed).** Every text token is tested against every surface it sits on (≥ 4.5:1; small muted text ≥ 4.5:1 on the raised tone; the bar and glyph colours ≥ 3:1). OpenCode's own muted grey fails this on its raised surfaces (4.2:1 and 3.7:1), so it is not copied.
