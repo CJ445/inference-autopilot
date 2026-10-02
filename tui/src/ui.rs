@@ -9,16 +9,21 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::{Frame, Terminal};
 use serde_json::Value;
 
-use crate::app::{is_closed, ActionKind, App, Conn, Remote, Screen, CONFIRM_GUARD, KEYMAP};
+use crate::app::{is_closed, ActionKind, App, Conn, Palette, Remote, Screen, CONFIRM_GUARD, KEYMAP};
 use crate::model::{flag, num, text, Check, Evidence, Incident, Obj, Watchdog};
 use crate::theme::{self, ACCENT, BORDER, CRITICAL, HEALTHY, TEXT_MUTED, WARNING};
-use crate::pipeline::{self, Stage as PStage};
+use crate::pipeline;
 use crate::plain as words;
 use crate::timeparse::{clock_hms, parse_rfc3339};
+
+mod chrome;
+mod overlay;
+mod spaces;
+mod stream;
 
 pub const MIN_W: u16 = 72;
 pub const MIN_H: u16 = 18;
@@ -72,18 +77,12 @@ fn split_row(mut left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: usi
 }
 
 /// A section divider: `─ Title ────────  note`.
-fn rule(title: &str, note: Option<Span<'static>>, width: usize) -> Line<'static> {
-    let note_w = note.as_ref().map_or(0, |n| n.content.chars().count() + 2);
-    let fill = width.saturating_sub(title.chars().count() + note_w + 5);
-    let mut spans = vec![
-        span(" ─ ", BORDER),
-        bold(title.to_string(), TEXT_MUTED),
-        span(format!(" {}", "─".repeat(fill)), BORDER),
-    ];
+fn rule(title: &str, note: Option<Span<'static>>, _width: usize) -> Line<'static> {
+    // a quiet label (small caps feeling): the space above it separates, not a line
+    let mut spans = vec![plain(" "), bold(title.to_uppercase(), TEXT_MUTED)];
     if let Some(n) = note {
-        spans.push(plain(" "));
+        spans.push(plain("   "));
         spans.push(n);
-        spans.push(plain(" "));
     }
     Line::from(spans)
 }
@@ -161,60 +160,87 @@ pub fn render(f: &mut Frame, app: &App) {
         f.render_widget(Paragraph::new(msg).style(fg(WARNING)), area);
         return;
     }
-    // While practicing (amber) or while a REAL fault is active (red), a loud one-line banner sits
-    // under the header on EVERY screen.
+    // the page: a tonal surface in the tonal themes, the terminal's own background otherwise
+    f.render_widget(Block::default().style(Style::default().bg(theme::PAGE).fg(theme::TEXT)), area);
+    // While testing (amber) or while a REAL fault is active (red), a loud one-line banner sits under
+    // the header on EVERY space.
     let banner = app.practice || app.active_fault().is_some();
+    let bar_h: u16 = if area.height >= 22 { 3 } else { 2 };
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints(if banner {
-            vec![Constraint::Length(3), Constraint::Length(1), Constraint::Min(5), Constraint::Length(1)]
+            vec![Constraint::Length(2), Constraint::Length(1), Constraint::Min(4), Constraint::Length(bar_h), Constraint::Length(1)]
         } else {
-            vec![Constraint::Length(3), Constraint::Min(5), Constraint::Length(1)]
+            vec![Constraint::Length(2), Constraint::Min(4), Constraint::Length(bar_h), Constraint::Length(1)]
         })
         .split(area);
-    header(f, rows[0], app);
+    chrome::header(f, rows[0], app);
     if app.practice {
         practice_banner(f, rows[1], app);
     } else if banner {
         fault_banner(f, rows[1], app);
     }
-    let (main, foot) = if banner { (rows[2], rows[3]) } else { (rows[1], rows[2]) };
-    // An approve/reject in flight is shown inline, above the screen it was started from.
-    let pane = if app.busy.is_some() && main.height > 8 {
-        let split = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(1)])
-            .split(main);
-        progress_banner(f, split[0], app);
-        split[1]
+    let (main, bar, foot) = if banner { (rows[2], rows[3], rows[4]) } else { (rows[1], rows[2], rows[3]) };
+    // the workload panel sits at the right on a wide terminal (or when asked for), over the stream
+    let panel_w: u16 = 38;
+    let wants_panel = matches!(app.screen, Screen::Dashboard | Screen::Lab | Screen::Detail(_)) && !app.details;
+    let (pane, panel) = if wants_panel && app.panel_open(area.width) && main.width >= 80 {
+        if area.width >= 110 {
+            let split = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Min(40), Constraint::Length(panel_w)]).split(main);
+            (split[0], Some(split[1]))
+        } else {
+            (main, Some(Rect { x: main.right() - panel_w, y: main.y, width: panel_w, height: main.height }))
+        }
     } else {
-        main
+        (main, None)
     };
+    // the older, denser views (technical details, System, Help) carry their own one-column lead
+    let dense = Rect { x: pane.x + 1, y: pane.y + 1, width: pane.width.saturating_sub(2), height: pane.height.saturating_sub(1) };
+    let pane_for = |screen: &Screen, details: bool| match screen {
+        Screen::System | Screen::Help => dense,
+        Screen::Dashboard | Screen::Incidents | Screen::Audit | Screen::Detail(_) if details => dense,
+        _ => pane,
+    };
+    let (shown, pane) = (pane, pane_for(&app.screen, app.details));
+    let _ = shown;
     match &app.screen {
         Screen::Dashboard if app.details => overview(f, pane, app),
-        Screen::Dashboard => home(f, pane, app),
+        Screen::Dashboard => spaces::home(f, pane, app),
         Screen::Incidents if app.details => incidents(f, pane, app),
-        Screen::Incidents => incident_list(f, pane, app),
+        Screen::Incidents => spaces::incident_list(f, pane, app),
         Screen::Detail(id) => detail(f, pane, app, id),
-        Screen::Lab => lab(f, pane, app),
+        Screen::Lab => spaces::lab(f, pane, app),
         Screen::Audit if app.details => audit(f, pane, app),
-        Screen::Audit => audit_plain(f, pane, app),
+        Screen::Audit => spaces::activity(f, pane, app),
         Screen::System => system(f, pane, app),
         Screen::Help => help(f, pane, app),
     }
-    footer(f, foot, app);
-    if app.confirm.is_some() {
-        confirm_modal(f, area, app);
-    } else if app.stop_confirm {
-        stop_modal(f, area, app);
-    } else if app.refusal.is_some() {
-        refusal_modal(f, area, app);
-    } else if app.fault_confirm {
-        fault_modal(f, area, app);
-    } else if app.palette.is_some() {
-        palette_modal(f, area, app);
+    if let Some(p) = panel {
+        if p.x != pane.right() {
+            f.render_widget(Clear, p);
+        }
+        chrome::workload_panel(f, p, app);
     }
+    chrome::draw_bar(f, bar, app);
+    chrome::footer(f, foot, app);
+    chrome::toast(f, main, app);
+    let overlay = if app.confirm.is_some() {
+        overlay::confirm_modal(f, area, app)
+    } else if app.stop_confirm {
+        overlay::stop_modal(f, area, app)
+    } else if app.refusal.is_some() {
+        overlay::refusal_modal(f, area, app)
+    } else if app.fault_confirm {
+        overlay::fault_modal(f, area, app)
+    } else if app.palette.is_some() {
+        overlay::palette_modal(f, area, app)
+    } else {
+        None
+    };
     theme::apply(f.buffer_mut(), app.theme);
+    if let Some(rect) = overlay {
+        theme::dim_outside(f.buffer_mut(), rect);   // after theming: it blends RGB, or marks DIM
+    }
 }
 
 pub fn render_to_buffer(app: &App, width: u16, height: u16) -> Buffer {
@@ -238,101 +264,6 @@ pub fn render_to_string(app: &App, width: u16, height: u16) -> String {
 
 // ---- header, sidebar, footer ----------------------------------------------------------------
 
-fn header(f: &mut Frame, area: Rect, app: &App) {
-    let w = area.width as usize;
-    let status = match &app.conn {
-        Conn::Connecting => bold("… CONNECTING", WARNING),
-        Conn::Offline { .. } => bold("✗ CONTROL PLANE OFFLINE", CRITICAL),
-        Conn::Online if app.snapshot.is_none() => bold("… LOADING", WARNING),
-        Conn::Online => {
-            let health = app.snapshot.as_ref().map_or("N/A", |s| s.status.health.as_str());
-            if health == "HEALTHY" {
-                span("● CONTROL ONLINE", HEALTHY)
-            } else {
-                bold(format!("! {health}"), WARNING)
-            }
-        }
-    };
-    let mut left = vec![plain(" "), bold("INFERENCE AUTOPILOT", ACCENT)];
-    if app.snapshot.is_some() {
-        left.push(plain("  "));
-        left.push(mode_badge(app));
-    }
-    let title = split_row(left, vec![status], w);
-
-    // navigation: the current area is bracketed (so it does not rest on colour), Incidents carries
-    // the number of open incidents
-    let open = app.rows().iter().filter(|i| !is_closed(&i.status)).count();
-    let here = match &app.screen {
-        Screen::Detail(_) => &Screen::Incidents,
-        other => other,
-    };
-    let mut nav: Vec<Span> = vec![plain(" ")];
-    for (n, (screen, label)) in [
-        (Screen::Dashboard, "Home"), (Screen::Incidents, "Incidents"), (Screen::Lab, "Lab"),
-        (Screen::Audit, "Activity"), (Screen::System, "System"),
-    ].into_iter().enumerate() {
-        let text = format!("{} {label}", n + 1);
-        if &screen == here {
-            nav.push(bold(format!("[{text}]"), ACCENT));
-        } else {
-            nav.push(plain(format!(" {text} ")));
-        }
-        if screen == Screen::Incidents && open > 0 {
-            nav.push(bold(format!(" ● {open}"), WARNING));
-        }
-        nav.push(plain(" "));
-    }
-    if app.screen == Screen::Help {
-        nav.push(bold("[? Help]", ACCENT));
-    }
-
-    // what protects you, right-aligned, dropped from the right when the row is narrow
-    // Warnings come first so they are the LAST thing to be dropped when the row is narrow.
-    let mut chips: Vec<Vec<Span>> = Vec::new();
-    if let Some(s) = &app.snapshot {
-        if app.is_stale() {
-            let age = app.data_age().map_or(0, |d| d.as_secs());
-            chips.push(vec![bold(format!("STALE {}", human_age(age as f64)), WARNING)]);
-        }
-        let real = s.status.mode.as_deref() != Some("SIMULATION");
-        if real && app.telemetry_stale() {
-            chips.push(vec![span(format!("telemetry stale ({})", human_age(app.telemetry_age_secs().unwrap_or(0.0))), WARNING)]);
-        }
-        if real && s.poll_ms > 1500 {
-            chips.push(vec![span(format!("SLOW API ({:.1}s)", s.poll_ms as f64 / 1000.0), WARNING)]);
-        }
-        if real {
-            let armed = s.status.watchdog.as_ref().map(|w| w.state == "armed");
-            chips.push(vec![muted("Watchdog "), match armed { Some(true) => span("✓", HEALTHY), _ => span("!", CRITICAL) }]);
-            chips.push(vec![muted("Audit "), mark(s.status.audit.as_ref().map(|a| a.valid))]);
-        } else {
-            chips.push(vec![muted("simulated session")]);
-        }
-        if app.details {
-            chips.push(vec![muted(na(s.status.info.profile.clone()))]);   // which configuration (technical)
-        }
-    } else {
-        chips.push(vec![muted("Watchdog ?   Audit ?")]);
-    }
-    if let Conn::Offline { error, .. } = &app.conn {
-        chips.push(vec![muted(format!("Retrying… ({error})"))]);
-    }
-    let room = w.saturating_sub(width_of(&nav) + 2);
-    let mut right: Vec<Span> = Vec::new();
-    for chip in chips {
-        let cost = width_of(&chip) + 3;
-        if width_of(&right) + cost > room {
-            break;
-        }
-        right.extend(chip);
-        right.push(plain("   "));
-    }
-    let nav_row = split_row(nav, right, w);
-    let block = Block::default().borders(Borders::BOTTOM).border_style(fg(BORDER));
-    f.render_widget(Paragraph::new(vec![title, nav_row]).block(block), area);
-}
-
 /// Which world this is, in words and in reverse video (so it does not rest on colour alone).
 /// REAL claims only what the data shows: GPU-REAL needs a GPU reading from the real telemetry
 /// (a finer claim, such as which container runtime, would need the TUI to name it: it does not).
@@ -348,77 +279,8 @@ fn mode_badge(app: &App) -> Span<'static> {
     Span::styled(format!(" {text} "), fg(color).add_modifier(Modifier::REVERSED | Modifier::BOLD))
 }
 
-/// A and R are live only on an incident's own page, and only while it awaits a decision.
-fn can_decide(app: &App) -> bool {
-    matches!(app.screen, Screen::Detail(_))
-        && matches!(app.conn, Conn::Online)
-        && app.busy.is_none()
-        && app.selected_incident().map_or(false, awaiting_decision)
-}
-
 fn awaiting_decision(i: &Incident) -> bool {
     i.status == "POLICY_CHECK" && i.proposal.is_some()
-}
-
-fn footer(f: &mut Frame, area: Rect, app: &App) {
-    let line = match app.active_notice() {
-        Some(n) => Line::from(span(format!(" {}", n.text), if n.is_error { CRITICAL } else { HEALTHY })),
-        None => {
-            let live = can_decide(app);
-            let offer = app.offer();
-            // (key, label, active, keep-priority): when the row is too narrow the lowest
-            // priorities go first, so Quit is never the one that falls off the edge. Only the keys
-            // that work on this screen are listed.
-            let mut hints: Vec<(&str, &str, bool, u8)> = vec![("Ctrl+P", "Commands", true, 8), ("?", "Help", true, 1), ("Q", "Quit", true, 9)];
-            match &app.screen {
-                Screen::Detail(_) => {
-                    hints.push(("A", "Approve", live, 7));
-                    hints.push(("R", "Reject", live, 7));
-                    hints.push(("↑↓", "Scroll", true, 4));
-                    hints.push(("Esc", "Back", true, 6));
-                    hints.push(("D", if app.details { "Simple view" } else { "Technical details" }, true, 5));
-                }
-                Screen::System => {
-                    hints.push(("D", "Run checks again", true, 7));
-                    hints.push(("X", "Stop", true, 7));
-                    hints.push(("←→", "Areas", true, 3));
-                }
-                Screen::Help => hints.push(("Esc", "Back", true, 6)),
-                screen => {
-                    if matches!(screen, Screen::Dashboard | Screen::Incidents | Screen::Lab) && !app.rows().is_empty() {
-                        hints.push(("Enter", "Review", true, 6));
-                    }
-                    if matches!(screen, Screen::Incidents | Screen::Audit) {
-                        hints.push(("↑↓", "Navigate", true, 4));
-                    }
-                    hints.push(("R", if app.practice { "Run again" } else { "Run test" }, !matches!(screen, Screen::Incidents), 7));
-                    if app.practice {
-                        let healthy = app.snapshot.as_ref().and_then(|s| s.status.practice.as_ref()).map(|p| p.stage.as_str()) == Some("healthy");
-                        hints.push(("F", "Break it", healthy, 5));
-                        if matches!(screen, Screen::Dashboard | Screen::Lab) {
-                            hints.push(("Esc", "Leave test", true, 6));
-                        }
-                    } else if offer.can_break {
-                        hints.push(("F", "Inject fault", true, 6));
-                    }
-                    hints.push(("←→", "Areas", true, 3));
-                    hints.push(("D", if app.details { "Simple view" } else { "Details" }, true, 2));
-                }
-            }
-            let cost = |h: &(&str, &str, bool, u8)| h.0.chars().count() + h.1.chars().count() + 4;
-            while 1 + hints.iter().map(cost).sum::<usize>() > area.width as usize && hints.len() > 1 {
-                let weakest = (0..hints.len()).min_by_key(|&n| hints[n].3).unwrap_or(0);
-                hints.remove(weakest);
-            }
-            let mut spans = vec![plain(" ")];
-            for (key, label, on, _) in hints {
-                spans.push(if on { bold(key, theme::TEXT) } else { muted(key) });
-                spans.push(muted(format!(" {label}   ")));
-            }
-            Line::from(spans)
-        }
-    };
-    f.render_widget(Paragraph::new(line), area);
 }
 
 // ---- overview -------------------------------------------------------------------------------
@@ -509,65 +371,6 @@ fn fault_banner(f: &mut Frame, area: Rect, app: &App) {
     let text = if full.chars().count() <= area.width as usize { full } else { base };
     let pad = " ".repeat((area.width as usize).saturating_sub(text.chars().count()));
     f.render_widget(Paragraph::new(Line::from(Span::styled(format!("{text}{pad}"), style))), area);
-}
-
-/// The dialog that stands between the operator and pausing the REAL workload.
-/// Optional sections are dropped, last first, until the dialog fits: the decision line (and the
-/// words above it that say what is about to happen) are never the part that is cut off.
-fn fit_sections(area: Rect, core_top: Vec<Line<'static>>, optional: Vec<Vec<Line<'static>>>, decision: Vec<Line<'static>>) -> Vec<Line<'static>> {
-    let room = (area.height as usize).saturating_sub(2);
-    let mut keep = optional.len();
-    let total = |k: usize| core_top.len() + decision.len() + optional.iter().take(k).map(Vec::len).sum::<usize>();
-    while keep > 0 && total(keep) > room {
-        keep -= 1;
-    }
-    let mut lines = core_top;
-    for section in optional.into_iter().take(keep) {
-        lines.extend(section);
-    }
-    lines.extend(decision);
-    lines
-}
-
-fn fault_modal(f: &mut Frame, area: Rect, app: &App) {
-    let minutes = crate::app::FAULT_SECONDS / 60;
-    let target = app.snapshot.as_ref().and_then(|s| s.status.info.workload.clone()).unwrap_or_else(|| "N/A".into());
-    let armed = app.now.saturating_duration_since(app.fault_opened) >= CONFIRM_GUARD;
-    let width = 80.min(area.width);
-    let top = vec![
-        split_row(
-            vec![plain(" "), bold("REAL INFRASTRUCTURE FAULT", CRITICAL)],
-            vec![bold("LIVE · GPU-REAL", CRITICAL), plain(" ")],
-            width.saturating_sub(4) as usize,
-        ),
-        Line::from(format!(" This will pause the managed workload {target}.")),
-        Line::from(format!(" It stops answering for up to {minutes} minutes, then resumes by itself.")),
-    ];
-    let flow = vec![
-        blank(),
-        Line::from(muted(" Expected flow")),
-        Line::from("  Healthy › Paused › Detected › Your approval › Restart › Verified recovery"),
-    ];
-    let safety = vec![
-        blank(),
-        Line::from(muted(" Safety")),
-        Line::from("  ✓ only the managed workload, by its checked identity"),
-        Line::from("  ✓ a recovery lease is saved before anything is paused"),
-        Line::from(format!("  ✓ it is resumed automatically after {minutes} minutes")),
-        Line::from("  ✓ a separate process resumes it even if this one dies"),
-    ];
-    let decision = vec![
-        blank(),
-        Line::from(vec![
-            plain(" "),
-            if armed { bold("[Enter] Inject fault", ACCENT) } else { muted("[Enter] Inject fault") },
-            bold("   [Esc] Cancel", ACCENT),
-        ]),
-    ];
-    let lines = fit_sections(area, top, vec![safety, flow], decision);
-    let rect = centered(area, width, lines.len() as u16 + 2);
-    f.render_widget(Clear, rect);
-    f.render_widget(Paragraph::new(lines).block(modal_block("Confirm", CRITICAL)), rect);
 }
 
 /// The loud one-line label shown on every screen while a simulation is on screen.
@@ -804,157 +607,6 @@ fn safety_section(app: &App, w: usize) -> Vec<Line<'static>> {
 // ---- plain (default) views ---------------------------------------------------------------------
 // Written from the same data as the technical views, in words a person follows. `D` shows the
 // technical versions; nothing here is removed from them.
-
-fn plain_chip(status: &str) -> Span<'static> {
-    let (_, color) = theme::state(status);
-    bold(format!("● {}", words::state_phrase(status)), color)
-}
-
-fn started_at(i: &Incident) -> String {
-    first_time(i)
-}
-
-fn attention_rows(app: &App, w: usize) -> Vec<Line<'static>> {
-    let rows = app.rows();
-    let mut lines = Vec::new();
-    for (idx, i) in rows.iter().enumerate().take(5) {
-        let sel = idx == app.selected;
-        let when = match i.status.as_str() {
-            "RESOLVED" => format!("Recovered {}", ago(app, &i.timeline.last().map_or(String::new(), |t| t.at.clone()))),
-            s if is_closed(s) => format!("Closed {}", ago(app, &i.timeline.last().map_or(String::new(), |t| t.at.clone()))),
-            _ => format!("Detected {}", ago(app, &i.timeline.first().map_or(String::new(), |t| t.at.clone()))),
-        };
-        let head = vec![
-            if sel { bold(" › ", ACCENT) } else { plain("   ") },
-            badge_span(&i.status),
-            plain(format!("   {}", words::problem_title(&i.category))),
-        ];
-        let row = split_row(head, vec![muted(format!("{} · {when}", i.incident_id)), plain(" ")], w);
-        lines.push(if sel { highlighted(row.spans, w) } else { row });
-    }
-    lines
-}
-
-fn detail_plain(i: &Incident, w: usize, app: &App) -> Vec<Line<'static>> {
-    let required = i.verification.as_ref().and_then(|v| v.required_completions);
-    let mut l: Vec<Line> = Vec::new();
-    l.push(split_row(vec![plain(" "), bold(words::problem_title(&i.category), theme::TEXT)], vec![plain_chip(&i.status)], w));
-    l.push(Line::from(muted(format!(
-        " {} · {} · started {}",
-        i.service.clone().unwrap_or_else(|| "N/A".into()), i.incident_id, started_at(i)
-    ))));
-    l.push(blank());
-    l.push(pipeline_line(&pipeline::stages(Some(i), true), w));
-    l.push(blank());
-
-    l.push(rule("What happened", None, w));
-    l.extend(wrapped(words::problem_summary(&i.category).unwrap_or(&words::problem_title(&i.category)), w));
-    l.push(blank());
-
-    l.push(rule("What we found", None, w));
-    match &i.rca {
-        Some(r) if r.insufficient_evidence || r.root_cause.is_none() => {
-            l.push(Line::from(" Not enough evidence to name a cause."));
-        }
-        Some(r) => l.extend(wrapped(r.root_cause.as_ref().map_or("", |c| c.statement.as_str()), w)),
-        None => l.push(Line::from(muted(" N/A"))),
-    }
-    for e in &i.evidence {
-        let sentence = words::evidence_sentence(e).unwrap_or_else(|| format!("{}: {}", words::humanise(&e.metric), e.value));
-        let glyph = match e.relation.as_str() {
-            "supports" => muted("✓"),
-            "contradicts" => span("✗", WARNING),
-            _ => muted("·"),
-        };
-        l.push(Line::from(vec![plain(" "), glyph, plain(format!(" {sentence}"))]));
-    }
-    l.push(blank());
-
-    l.push(rule("Recommended action", None, w));
-    match &i.proposal {
-        Some(p) => {
-            l.push(Line::from(vec![plain(" "), bold(words::action_phrase(&p.action), theme::TEXT)]));
-            if p.action == "restart_workload" {
-                l.push(Line::from(muted(" The model is unavailable while it restarts. There is no rollback.")));
-            }
-        }
-        None if is_closed(&i.status) && i.status != "INSUFFICIENT_EVIDENCE" => {
-            l.push(Line::from(muted(" No proposal in the server's record.")));
-        }
-        None => l.push(Line::from(" No fix is proposed.")),
-    }
-    if awaiting_decision(i) {
-        l.push(Line::from(vec![plain(" "), bold("Needs your OK", WARNING)]));
-        l.push(blank());
-        // a decision needs the full incident on screen: the keys do nothing until it has loaded
-        let loaded = app.snapshot.as_ref().and_then(|s| s.detail.as_ref()).is_some_and(|d| d.incident_id == i.incident_id);
-        if loaded {
-            l.push(split_row(vec![], vec![bold("[ A ] ", ACCENT), plain("Approve    "), bold("[ R ] ", ACCENT), plain("Reject")], w));
-        } else {
-            l.push(Line::from(muted(" Loading the full details…")));
-        }
-    }
-    l.push(blank());
-
-    l.push(rule("Recovery check", None, w));
-    let checks = i.verification.as_ref().and_then(|v| v.checks.as_ref()).filter(|c| !c.is_empty());
-    match checks {
-        Some(checks) => {
-            let mut keys: Vec<&String> = checks.keys().collect();
-            keys.sort_by_key(|k| (CHECK_ORDER.iter().position(|c| c == k).unwrap_or(99), (*k).clone()));
-            for k in keys {
-                l.push(Line::from(vec![plain(" "), mark(Some(checks[k])), plain(format!(" {}", words::check_phrase(k, required)))]));
-            }
-            let (label, color) = (words::state_phrase(&i.status), theme::state(&i.status).1);
-            l.push(blank());
-            l.push(Line::from(vec![plain(" "), bold(label, color)]));
-        }
-        None if matches!(i.status.as_str(), "VERIFYING") => l.push(Line::from(muted(" In progress: waiting for the server's result."))),
-        None if is_closed(&i.status) => l.push(Line::from(muted(" The recovery check did not run."))),
-        None => l.extend(wrapped(&words::recovery_check(required), w)),
-    }
-    l.push(blank());
-
-    l.push(rule("Step by step", None, w));
-    for (time, phrase) in words::timeline_events(i) {
-        l.push(Line::from(vec![muted(format!(" {time}  ")), plain(phrase)]));
-    }
-    l.push(blank());
-    l.push(Line::from(muted(if app.details { " D  Simple view" } else { " D  Technical details" })));
-    l
-}
-
-fn audit_plain(f: &mut Frame, area: Rect, app: &App) {
-    let w = area.width as usize;
-    let s = app.snapshot.as_ref();
-    let fetched = s.and_then(|s| s.audit.as_ref());
-    let valid = fetched.map(|a| a.valid).or_else(|| s.and_then(|s| s.status.audit.as_ref().map(|a| a.valid)));
-    let mut lines = vec![blank(), match valid {
-        Some(true) => Line::from(span(" Activity log intact", HEALTHY)),
-        Some(false) => Line::from(bold(" ACTIVITY LOG INTEGRITY FAILURE", CRITICAL)),
-        None => Line::from(muted(" Activity log N/A")),
-    }];
-    lines.push(rule("What happened", None, w));
-    match fetched {
-        None => lines.push(Line::from(muted(" waiting for the activity log…"))),
-        Some(a) if a.events.is_empty() => {
-            lines.push(Line::from(vec![plain(" "), bold("NO RECENT ACTIVITY", theme::TEXT)]));
-            lines.push(Line::from(" Autopilot has not recorded any events yet."));
-            if !app.practice {
-                lines.push(blank());
-                lines.push(Line::from(vec![plain(" "), bold("[R] ", ACCENT), plain("Run a recovery test")]));
-            }
-        }
-        Some(a) => {
-            for e in &a.events {
-                lines.push(Line::from(vec![muted(" • "), plain(words::event_phrase(e))]));
-            }
-            lines.push(blank());
-            lines.push(Line::from(muted(" D  Technical details (event names, hashes)")));
-        }
-    }
-    f.render_widget(Paragraph::new(lines).scroll((app.scroll, 0)), area);
-}
 
 // ---- incidents screen -----------------------------------------------------------------------
 
@@ -1225,15 +877,19 @@ fn detail_lines(i: &Incident, w: usize) -> Vec<Line<'static>> {
 }
 
 fn detail(f: &mut Frame, area: Rect, app: &App, _id: &str) {
-    let lines = match app.selected_incident() {
-        Some(i) if app.details => detail_lines(i, area.width as usize),
-        Some(i) => detail_plain(i, area.width as usize, app),
-        None => vec![
-            blank(),
-            Line::from(span(" This incident is no longer reported by the control plane (Esc to go back).", WARNING)),
-        ],
-    };
-    f.render_widget(Paragraph::new(lines).scroll((app.scroll, 0)), area);
+    match app.selected_incident() {
+        Some(i) if app.details => {
+            f.render_widget(Paragraph::new(detail_lines(i, area.width as usize)).scroll((app.scroll, 0)), area);
+        }
+        Some(i) => {
+            let c = spaces::content(area);
+            stream::render_sticky(f, c, stream::stream_lines(app, i, c.width as usize), app.scroll);
+        }
+        None => f.render_widget(
+            Paragraph::new(vec![blank(), Line::from(span(" This incident is no longer reported by the control plane (Esc to go back).", WARNING))]),
+            area,
+        ),
+    }
 }
 
 // ---- audit ----------------------------------------------------------------------------------
@@ -1268,124 +924,9 @@ fn audit(f: &mut Frame, area: Rect, app: &App) {
 
 // ---- modals ---------------------------------------------------------------------------------
 
-fn centered(area: Rect, w: u16, h: u16) -> Rect {
-    let w = w.min(area.width);
-    let h = h.min(area.height);
-    Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h }
-}
-
-fn modal_block(title: &str, color: Color) -> Block<'static> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(format!(" {title} "))
-        .border_style(fg(color))
-}
-
 fn incident_by_id<'a>(app: &'a App, id: &str) -> Option<&'a Incident> {
     let s = app.snapshot.as_ref()?;
     s.detail.as_ref().filter(|d| d.incident_id == id).or_else(|| s.incidents.iter().find(|i| i.incident_id == id))
-}
-
-/// The recovery request: what happened, the evidence, the action, and why it is asking you.
-fn confirm_modal(f: &mut Frame, area: Rect, app: &App) {
-    let Some(c) = &app.confirm else { return };
-    let width: u16 = 78.min(area.width);
-    let room = (width as usize).saturating_sub(6);
-    let approve = c.kind == ActionKind::Approve;
-    let action = words::action_phrase(&c.action);
-    let mut top = vec![split_row(
-        vec![plain(" "), bold(if approve { "RECOVERY REQUEST" } else { "DECLINE THIS RECOVERY" }, WARNING)],
-        if c.practice { vec![bold("SIMULATION", WARNING), plain(" ")] } else { vec![bold("LIVE", CRITICAL), plain(" ")] },
-        width.saturating_sub(4) as usize,
-    )];
-    top.push(Line::from(vec![plain(" "), bold(words::problem_title(&c.category), theme::TEXT), muted(format!("   {}", c.incident_id))]));
-    for part in wrap_words(if c.why.is_empty() { "No cause statement from the server." } else { &c.why }, room) {
-        top.push(Line::from(format!(" {part}")));
-    }
-    top.push(Line::from(vec![plain(" "), muted("Proposed  "), bold(action, theme::TEXT), muted(format!("   workload {}", c.workload))]));
-    let effect = match (c.kind, c.action.as_str()) {
-        (ActionKind::Reject, _) => "No action is taken; the proposal is closed.".to_string(),
-        (ActionKind::Approve, _) if c.practice => "A simulated restart: nothing real is restarted.".to_string(),
-        (ActionKind::Approve, "restart_workload") => "The model is unavailable while it restarts. There is no rollback.".to_string(),
-        (ActionKind::Approve, _) => "The server executes the proposed action.".to_string(),
-    };
-    for part in wrap_words(&effect, room) {
-        top.push(Line::from(format!(" {part}")));
-    }
-    let mut evidence = Vec::new();
-    if let Some(i) = incident_by_id(app, &c.incident_id) {
-        let found: Vec<String> = i.evidence.iter().filter(|e| e.relation == "supports").filter_map(words::evidence_sentence).collect();
-        if !found.is_empty() {
-            evidence.push(blank());
-            evidence.push(Line::from(muted(" Evidence")));
-            for e in found {
-                for (n, part) in wrap_words(&e, room.saturating_sub(2)).into_iter().enumerate() {
-                    evidence.push(Line::from(format!("  {} {part}", if n == 0 { "•" } else { " " })));
-                }
-            }
-        }
-    }
-    let why_ask = if approve { vec![blank(), Line::from(muted(" This action is allowlisted and runs only after you approve it."))] } else { Vec::new() };
-    let armed = app.now.saturating_duration_since(c.opened) >= CONFIRM_GUARD;
-    let verb = if approve { "Approve" } else { "Decline" };
-    let decision = vec![
-        blank(),
-        Line::from(vec![
-            plain(" "),
-            if armed { bold(format!("[Enter] {verb}"), ACCENT) } else { muted(format!("[Enter] {verb}")) },
-            bold("   [Esc] Cancel", ACCENT),
-        ]),
-    ];
-    let lines = fit_sections(area, top, vec![why_ask, evidence], decision);
-    let rect = centered(area, width, lines.len() as u16 + 2);
-    f.render_widget(Clear, rect);
-    f.render_widget(Paragraph::new(lines).block(modal_block("Decision", theme::BORDER_FOCUSED)), rect);
-}
-
-/// The server refused an approval because the problem is gone: nothing was restarted.
-fn refusal_modal(f: &mut Frame, area: Rect, app: &App) {
-    let Some(id) = &app.refusal else { return };
-    let lines = vec![
-        Line::from(vec![plain(" "), bold("RECOVERY NO LONGER NEEDED", HEALTHY)]),
-        blank(),
-        Line::from(format!(" {id}: the latest observation shows the problem is gone.")),
-        Line::from(" The workload has recovered or is not running."),
-        blank(),
-        Line::from(vec![plain(" "), bold("No restart was performed.", theme::TEXT)]),
-        Line::from(muted(" The incident is closed as Cleared; nothing was approved, run or verified.")),
-        blank(),
-        Line::from(vec![plain(" "), bold("[any key] Close", ACCENT)]),
-    ];
-    let rect = centered(area, 70.min(area.width), lines.len() as u16 + 2);
-    f.render_widget(Clear, rect);
-    f.render_widget(Paragraph::new(lines).block(modal_block("Safety", HEALTHY)), rect);
-}
-
-/// The approve/reject in flight, with the SERVER's current state for that incident. It never
-/// predicts: the state shown is whatever the last poll reported.
-fn progress_banner(f: &mut Frame, area: Rect, app: &App) {
-    let Some(b) = &app.busy else { return };
-    let secs = app.now.saturating_duration_since(b.since).as_secs();
-    let server_state = match app.busy_incident() {
-        Some(i) => state_chip(&i.status),
-        None => muted("N/A"),
-    };
-    let lines = vec![
-        Line::from(vec![
-            plain(" "),
-            bold("Waiting for the server…", WARNING),
-            muted(format!("  {} {} sent ({secs}s)", b.kind.verb(), b.incident_id)),
-        ]),
-        Line::from(vec![
-            plain(" "),
-            muted("Server state  "),
-            server_state,
-            muted("   Remediation and verification can take a minute or two."),
-        ]),
-        hline(area.width as usize),
-    ];
-    f.render_widget(Paragraph::new(lines), area);
 }
 
 // ---- system screens (read-only; every value is the server's) ----------------------------------
@@ -1637,94 +1178,7 @@ fn help(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(l).scroll((app.scroll, 0)), area);
 }
 
-fn stop_modal(f: &mut Frame, area: Rect, app: &App) {
-    let rect = centered(area, 58, 10);
-    f.render_widget(Clear, rect);
-    let lines = vec![
-        Line::from(bold(" Stop control plane?", WARNING)),
-        blank(),
-        Line::from(" The operator UI will disconnect."),
-        Line::from(muted(" The control plane and its watchdog stop.")),
-        Line::from(muted(" The managed workload is not touched.")),
-        blank(),
-        Line::from(vec![
-            plain(" "),
-            if app.now.saturating_duration_since(app.stop_opened) >= CONFIRM_GUARD {
-                span("[Enter] Stop", ACCENT)
-            } else {
-                muted("[Enter] Stop")
-            },
-            span("   [Esc] Cancel", ACCENT),
-        ]),
-    ];
-    f.render_widget(Paragraph::new(lines).block(modal_block("Confirm", theme::BORDER_FOCUSED)), rect);
-}
-
-fn palette_modal(f: &mut Frame, area: Rect, app: &App) {
-    let Some(p) = &app.palette else { return };
-    let items = p.matches(app.offer());
-    let h = (items.len().max(1) as u16 + 4).min(area.height.saturating_sub(2));
-    let w = 56.min(area.width.saturating_sub(4));
-    let rect = Rect { x: area.x + (area.width - w) / 2, y: area.y + 2, width: w, height: h };
-    f.render_widget(Clear, rect);
-    let inner_w = w.saturating_sub(2) as usize;
-    let query = if p.query.is_empty() {
-        vec![plain(" › "), muted("Search commands…")]
-    } else {
-        vec![plain(" › "), plain(p.query.clone()), span("▏", ACCENT)]
-    };
-    let mut lines = vec![Line::from(query), hline(inner_w + 2)];
-    if items.is_empty() {
-        lines.push(Line::from(muted("   No matching command")));
-    }
-    for (n, cmd) in items.iter().enumerate() {
-        let sel = n == p.selected;
-        let spans = vec![if sel { bold(" › ", ACCENT) } else { plain("   ") }, plain(cmd.label())];
-        lines.push(if sel { highlighted(spans, inner_w) } else { Line::from(spans) });
-    }
-    f.render_widget(Paragraph::new(lines).block(modal_block("Commands", theme::BORDER_FOCUSED)), rect);
-}
-
 // ---- the pipeline, shared by Home, the incident page and the Lab ---------------------------------
-
-fn pstage_style(st: PStage) -> (Color, Modifier) {
-    match st {
-        PStage::Done => (HEALTHY, Modifier::empty()),
-        PStage::Active => (ACCENT, Modifier::BOLD),
-        PStage::Failed => (CRITICAL, Modifier::BOLD),
-        PStage::NotRun => (theme::TEXT_MUTED, Modifier::empty()),
-        PStage::NotApplicable => (theme::TEXT_MUTED, Modifier::CROSSED_OUT),
-    }
-}
-
-/// `✓ Observe › ✓ Detect › → Approve › ○ Recover …`: a glyph and a word per stage (never colour
-/// alone). On a narrow pane it falls back to the glyphs and the name of the stage the loop is on.
-fn pipeline_line(stages: &[PStage; 7], w: usize) -> Line<'static> {
-    // exactly as wide as the seven stages need; the leading space goes first when the pane is tight,
-    // so that an 80-column terminal (the common one) still gets the full words
-    let full: usize = pipeline::NAMES.iter().map(|n| n.len() + 2).sum::<usize>() + 3 * 6;
-    let mut spans = if w > full { vec![plain(" ")] } else { Vec::new() };
-    if w >= full {
-        for (n, (name, st)) in pipeline::NAMES.iter().zip(stages).enumerate() {
-            if n > 0 {
-                spans.push(span(" › ", BORDER));
-            }
-            let (color, modifier) = pstage_style(*st);
-            let waiting = *st == PStage::Active && n == 4;       // waiting for the operator
-            let color = if waiting { WARNING } else { color };
-            spans.push(Span::styled(format!("{} {name}", st.glyph()), fg(color).add_modifier(modifier)));
-        }
-    } else {
-        for st in stages {
-            let (color, modifier) = pstage_style(*st);
-            spans.push(Span::styled(format!("{} ", st.glyph()), fg(color).add_modifier(modifier)));
-        }
-        if let Some(n) = pipeline::current(stages) {
-            spans.push(bold(format!(" {}", pipeline::NAMES[n]), theme::TEXT));
-        }
-    }
-    Line::from(spans)
-}
 
 fn observing(app: &App) -> bool {
     matches!(app.conn, Conn::Online) && observation(app).is_some()
@@ -1776,421 +1230,8 @@ fn clock_of(i: &Incident, states: &[&str]) -> Option<String> {
 
 // ---- Home -----------------------------------------------------------------------------------------
 
-fn home(f: &mut Frame, area: Rect, app: &App) {
-    if app.snapshot.is_none() {
-        return no_data(f, area, app);
-    }
-    let w = area.width as usize;
-    let mut l = vec![blank()];
-    if matches!(app.conn, Conn::Offline { .. }) {
-        if let Some(line) = stale_line(app) {
-            l.push(line);                       // the values below are the last known ones
-            l.push(blank());
-        }
-    }
-    if app.practice {
-        l.extend(practice_guide(app));
-        l.push(blank());
-    }
-    l.push(rule("Inference", None, w));
-    l.extend(inference_facts(app));
-    l.push(blank());
-    l.push(rule("Autopilot", None, w));
-    l.extend(autopilot_lines(app, w));
-    l.push(blank());
-    l.push(rule("Quick actions", None, w));
-    l.push(quick_actions(app));
-    f.render_widget(Paragraph::new(l), area);
-}
-
-/// What the backend reports about the workload, and `N/A` for everything it does not.
-fn inference_facts(app: &App) -> Vec<Line<'static>> {
-    match workload_state(app) {
-        Some("absent") => {
-            return vec![
-                Line::from(vec![plain(" "), bold("NO WORKLOAD CONNECTED", theme::TEXT)]),
-                Line::from(" The control plane is running, but no managed inference"),
-                Line::from(" workload is currently available."),
-                Line::from(muted(" Autopilot will not create or start one automatically.")),
-                Line::from(muted(" Go to System (5) for diagnostics.")),
-            ]
-        }
-        Some("stopped") => {
-            return vec![
-                Line::from(vec![plain(" "), bold("WORKLOAD STOPPED", theme::TEXT)]),
-                Line::from(" The managed workload is stopped. Autopilot will not start it;"),
-                Line::from(muted(" start it yourself and it is picked up automatically.")),
-            ]
-        }
-        _ => {}
-    }
-    let info = app.snapshot.as_ref().map(|s| &s.status.info);
-    let o = observation(app);
-    let name = na(info.and_then(|i| i.workload.clone()).or_else(|| info.and_then(|i| i.model.clone())));
-    let state = if workload_state(app) == Some("starting") {
-        bold("→ STARTING", WARNING)
-    } else {
-        match o.and_then(|o| flag(o, "inference_probe_ok")) {
-            Some(true) => bold("✓ HEALTHY", HEALTHY),
-            Some(false) => bold("✗ NOT ANSWERING", CRITICAL),
-            None => muted("○ NO READING YET"),
-        }
-    };
-    let mut head = vec![plain(" "), bold(name.clone(), theme::TEXT), plain("   "), state];
-    if let Some(model) = info.and_then(|i| i.model.clone()).filter(|m| *m != name) {
-        head.push(muted(format!("   {model}")));
-    }
-    // a failed probe's duration is a timeout, not a measurement: only a probe that answered has one
-    let probe = o.filter(|o| flag(o, "inference_probe_ok") == Some(true))
-        .and_then(|o| num(o, "inference_probe_latency_ms")).map(|m| format!("{m:.0} ms"));
-    let rpm = app.rates.requests_per_min.map(|r| format!("{r:.0}/min"));
-    let lat = app.rates.latency_ms.map(|l| format!("{l:.0} ms"));
-    let used = o.and_then(|o| num(o, "gpu_memory_used_bytes"));
-    let total = o.and_then(|o| num(o, "gpu_memory_total_bytes")).filter(|t| *t > 0.0);
-    let temp = o.and_then(|o| num(o, "gpu_temperature_c"));
-    let util = o.and_then(|o| num(o, "gpu_utilization_percent"));
-    let memory = match (used, total) {
-        (Some(u), Some(t)) => format!("{:.0}% of {} GiB", u / t * 100.0, gib(t)),
-        _ => "N/A".into(),
-    };
-    vec![
-        Line::from(head),
-        kv("Requests", vec![plain(format!("{}   Mean latency {}   Probe {}", na(rpm), na(lat), na(probe)))]),
-        kv("GPU", vec![plain(format!(
-            "Memory {memory}   Temp {}   Busy {}",
-            na(temp.map(|t| format!("{t:.0}°C"))), na(util.map(|u| format!("{u:.0}%")))
-        ))]),
-    ]
-}
-
-fn autopilot_lines(app: &App, w: usize) -> Vec<Line<'static>> {
-    let mut l = Vec::new();
-    if matches!(app.conn, Conn::Offline { .. }) {
-        l.push(Line::from(vec![plain(" "), bold("✗ NOT WATCHING", CRITICAL), plain("  the control plane cannot be reached")]));
-        return l;
-    }
-    let rows = app.rows();
-    let age = app.telemetry_age_secs().map(|a| format!("Last observation {} ago", human_age(a)));
-    let mut head = vec![plain(" "), bold("✓ WATCHING", HEALTHY)];
-    if app.telemetry_stale() || app.is_stale() {
-        head = vec![plain(" "), bold("! WATCHING, BUT THE DATA IS OLD", WARNING)];
-    }
-    if let Some(a) = age {
-        head.push(muted(format!("   {a}")));
-    }
-    l.push(Line::from(head));
-    if rows.is_empty() {
-        l.push(Line::from(" No active incidents."));
-        if !app.practice {
-            l.push(Line::from(muted(" Want to see the recovery loop?  [R] Run a recovery test")));
-        }
-    } else {
-        l.extend(attention_rows(app, w));
-        if rows.iter().any(|i| !is_closed(&i.status)) {
-            l.push(Line::from(muted(" Enter  Review the selected incident")));
-        }
-    }
-    l.push(blank());
-    l.push(pipeline_line(&pipeline::stages(focus_incident(app), observing(app)), w));
-    l
-}
-
-fn quick_actions(app: &App) -> Line<'static> {
-    let offer = app.offer();
-    let mut spans = vec![plain(" ")];
-    let mut item = |key: &str, label: &str| {
-        spans.push(bold(format!("[{key}] "), ACCENT));
-        spans.push(plain(format!("{label}   ")));
-    };
-    item("R", if app.practice { "Run the test again" } else { "Run a recovery test" });
-    if offer.can_break {
-        item("F", "Inject a real fault");
-    }
-    item("I", "View incidents");
-    item("A", "View activity");
-    Line::from(spans)
-}
-
 // ---- Incidents ------------------------------------------------------------------------------------
-
-fn incident_list(f: &mut Frame, area: Rect, app: &App) {
-    let w = area.width as usize;
-    let rows = app.rows();
-    if rows.is_empty() {
-        let mut l = vec![
-            blank(),
-            Line::from(vec![plain(" "), bold("NO ACTIVE INCIDENTS", theme::TEXT)]),
-            blank(),
-            Line::from(" Autopilot is watching the inference workload."),
-            blank(),
-            Line::from(muted(" Want to see the recovery loop?")),
-            Line::from(vec![plain(" "), bold("[R] ", ACCENT), plain("Run a recovery test")]),
-        ];
-        if no_workload(app) {
-            l[3] = Line::from(" There is no managed workload to watch right now.");
-        }
-        return f.render_widget(Paragraph::new(l), area);
-    }
-    let mut lines = vec![blank()];
-    for (idx, i) in rows.iter().enumerate() {
-        let sel = idx == app.selected;
-        let when = match i.status.as_str() {
-            "RESOLVED" => format!("Recovered {}", ago(app, &i.timeline.last().map_or(String::new(), |t| t.at.clone()))),
-            s if is_closed(s) => format!("Closed {}", ago(app, &i.timeline.last().map_or(String::new(), |t| t.at.clone()))),
-            _ => format!("Detected {}", ago(app, &i.timeline.first().map_or(String::new(), |t| t.at.clone()))),
-        };
-        let head = vec![
-            if sel { bold(" › ", ACCENT) } else { plain("   ") },
-            badge_span(&i.status),
-            plain(format!("   {}", words::problem_title(&i.category))),
-        ];
-        let tail = vec![muted(format!("{} · {when}", i.incident_id)), plain(" ")];
-        let row = split_row(head, tail, w);
-        lines.push(if sel { highlighted(row.spans, w) } else { row });
-        let diagnosis = i.rca.as_ref().and_then(|r| r.root_cause.as_ref()).map(|c| c.statement.clone()).filter(|s| !s.is_empty());
-        match (i.status.as_str(), diagnosis) {
-            ("INSUFFICIENT_EVIDENCE", _) => lines.push(Line::from(muted("     Not enough evidence to name a cause."))),
-            (_, Some(d)) => lines.push(Line::from(muted(format!("     Diagnosis: {d}")))),
-            _ => {}
-        }
-        let proposal = i.proposal.as_ref().map(|p| words::action_phrase(&p.action));
-        let detail = match (i.status.as_str(), proposal) {
-            ("PROPOSED" | "POLICY_CHECK", Some(p)) => Some(format!("Action: {p} · Approval: REQUIRED")),
-            ("RESOLVED", Some(p)) => Some(format!("Action: {p} · Approved · Recovery verified")),
-            ("REJECTED", Some(p)) => Some(format!("Action: {p} · You declined it")),
-            ("CLEARED", Some(p)) => Some(format!("Action: {p} · Not needed: the problem went away")),
-            ("UNRESOLVED", Some(p)) => Some(format!("Action: {p} · Recovery could not be verified")),
-            (_, Some(p)) => Some(format!("Action: {p}")),
-            _ => None,
-        };
-        if let Some(d) = detail {
-            lines.push(Line::from(muted(format!("     {d}"))));
-        }
-        lines.push(blank());
-    }
-    lines.push(Line::from(muted(" Enter  Review the selected incident   D  Technical details")));
-    f.render_widget(Paragraph::new(lines), area);
-}
 
 // ---- Lab --------------------------------------------------------------------------------------------
 
-/// Where the next step is, in words, for the line under a story step.
-fn lab(f: &mut Frame, area: Rect, app: &App) {
-    let w = area.width as usize;
-    let mut l = vec![blank()];
-    if app.practice {
-        l.extend(story_lines(app, w));
-    } else if let Some(fault) = app.active_fault() {
-        l.extend(real_fault_lines(app, fault, w));
-    } else {
-        l.extend(lab_menu(app, w));
-    }
-    f.render_widget(Paragraph::new(l).scroll((app.scroll, 0)), area);
-}
 
-fn lab_menu(app: &App, w: usize) -> Vec<Line<'static>> {
-    let offer = app.offer();
-    let mut l = vec![
-        Line::from(vec![plain(" "), bold("LAB", theme::TEXT), muted("   Experience the recovery loop before you need it")]),
-        blank(),
-        rule("Recovery tests", Some(muted("safe · simulated · nothing real is touched")), w),
-        Line::from(vec![plain(" "), bold("[R] ", ACCENT), bold("Model becomes unresponsive", theme::TEXT), muted("   Run")]),
-        Line::from(muted("     The model stops answering. Autopilot detects it, finds the cause, proposes a")),
-        Line::from(muted("     restart, waits for your OK, restarts, and checks the model really recovered.")),
-        blank(),
-        rule("Real infrastructure", Some(span("affects the running workload", WARNING)), w),
-    ];
-    if offer.can_break {
-        l.push(Line::from(vec![plain(" "), bold("[F] ", ACCENT), bold("Pause the running workload", theme::TEXT), muted("   Inject")]));
-        l.push(Line::from(muted("     Pauses the managed model server for up to two minutes so it stops answering.")));
-        l.push(Line::from(muted("     It always resumes by itself. Asks you to confirm first.")));
-    } else {
-        l.push(Line::from(vec![plain(" "), muted("[F] Pause the running workload")]));
-        let why = match (&app.conn, workload_state(app), app.snapshot.as_ref().and_then(|s| s.status.faults.as_ref())) {
-            (Conn::Online, _, None) => "this control plane does not offer real faults",
-            (Conn::Online, Some("absent" | "stopped"), _) => "there is no running workload to pause",
-            (Conn::Online, _, Some(f)) if !f.available => "this control plane does not offer real faults",
-            (Conn::Online, _, _) => "not available right now",
-            _ => "the control plane cannot be reached",
-        };
-        l.push(Line::from(muted(format!("     Not available: {why}."))));
-    }
-    l.push(blank());
-    l.push(rule("The loop", None, w));
-    l.push(pipeline_line(&pipeline::stages(None, observing(app)), w));
-    l
-}
-
-/// The real fault in progress: what is happening and what happens next, from the server's report.
-fn real_fault_lines(app: &App, fault: &crate::model::ActiveFault, w: usize) -> Vec<Line<'static>> {
-    let left = (fault.expires_at - app.wall).max(0.0) as u64;
-    let mut l = vec![
-        split_row(
-            vec![plain(" "), bold("REAL FAULT IN PROGRESS", CRITICAL)],
-            vec![bold("LIVE", CRITICAL), plain(" ")],
-            w,
-        ),
-        Line::from(muted(" The managed workload is paused on purpose. It resumes by itself, whatever happens here.")),
-        blank(),
-        pipeline_line(&pipeline::stages(focus_incident(app), observing(app)), w),
-        blank(),
-    ];
-    l.extend(step("✓", HEALTHY, None, "Fault injected",
-                  &format!("The workload is paused; it resumes by itself in {}:{:02}.", left / 60, left % 60), w));
-    l.extend(incident_steps(app, w));
-    l
-}
-
-const STEP_INDENT: usize = 33;        // " ✓ 15:02:11  " + a 20-column title
-
-/// One step of the story: `✓ 15:02:11  Detected            what it means`, the explanation wrapped
-/// beside the title so the titles line up down the page.
-fn step(glyph: &str, color: Color, time: Option<String>, title: &str, detail: &str, w: usize) -> Vec<Line<'static>> {
-    let head = |first: Option<&str>| {
-        let mut spans = vec![plain(" "), bold(glyph.to_string(), color), plain(" ")];
-        spans.push(match &time {
-            Some(t) => muted(format!("{t}  ")),
-            None => muted("          "),
-        });
-        spans.push(bold(format!("{title:<20}"), theme::TEXT));
-        if let Some(text) = first {
-            spans.push(muted(text.to_string()));
-        }
-        Line::from(spans)
-    };
-    let room = w.saturating_sub(STEP_INDENT + 1).max(20);
-    let parts = wrap_words(detail, room);
-    let mut lines = vec![head(parts.first().map(|p| p.as_str()))];
-    for part in parts.iter().skip(1) {
-        lines.push(Line::from(muted(format!("{}{part}", " ".repeat(STEP_INDENT)))));
-    }
-    lines
-}
-
-fn note(text: &str, w: usize) -> Vec<Line<'static>> {
-    wrap_words(text, w.saturating_sub(STEP_INDENT + 1).max(20))
-        .into_iter()
-        .map(|p| Line::from(muted(format!("{}{p}", " ".repeat(STEP_INDENT)))))
-        .collect()
-}
-
-/// The recovery test as a story. Every line comes from what the server reported; a step that has
-/// not happened yet is shown as not run, never as done. SIMULATION is in the header and the banner.
-fn story_lines(app: &App, w: usize) -> Vec<Line<'static>> {
-    let stage = app.snapshot.as_ref().and_then(|s| s.status.practice.as_ref()).map(|p| p.stage.clone());
-    let mut l = vec![
-        Line::from(vec![plain(" "), bold("RECOVERY TEST", theme::TEXT), muted("   Model becomes unresponsive")]),
-        blank(),
-        pipeline_line(&pipeline::stages(focus_incident(app), true), w),
-        blank(),
-    ];
-    let Some(stage) = stage else {
-        l.push(Line::from(muted(" Preparing the recovery test…")));
-        return l;
-    };
-    l.extend(step("✓", HEALTHY, None, "Test started", "The simulated model is healthy.", w));
-    match (stage.as_str(), focus_incident(app)) {
-        ("healthy", _) => {
-            l.extend(step("→", ACCENT, None, "Injecting the fault", "Asking the server to make the model stop answering…", w));
-        }
-        ("detecting", None) => {
-            l.extend(step("✓", HEALTHY, None, "Fault injected", "The simulated model stopped answering test requests.", w));
-            l.extend(step("→", ACCENT, None, "Detecting", "Autopilot needs the problem on consecutive checks before it opens an incident.", w));
-        }
-        _ => {
-            l.extend(step("✓", HEALTHY, None, "Fault injected", "The simulated model stopped answering test requests.", w));
-            l.extend(incident_steps(app, w));
-        }
-    }
-    l.push(blank());
-    let finished = focus_incident(app).is_some_and(|i| is_closed(&i.status));
-    l.push(Line::from(muted(if finished {
-        " R  Run it again   Enter  View the incident   Esc  Leave the test"
-    } else {
-        " Enter  Review the incident   Esc  Leave the test"
-    })));
-    l
-}
-
-/// Detected → diagnosis → proposal → decision → recovery → verification, from the incident the
-/// server holds. Times are the server's own (the incident timeline).
-fn incident_steps(app: &App, w: usize) -> Vec<Line<'static>> {
-    let Some(i) = focus_incident(app) else { return Vec::new() };
-    let mut l = Vec::new();
-    let status = i.status.as_str();
-    l.extend(step("✓", HEALTHY, clock_of(i, &["DETECTED", "TRIAGING"]), "Detected",
-                  &format!("{} ({})", words::problem_title(&i.category), i.incident_id), w));
-    match status {
-        "DETECTED" | "TRIAGING" => {
-            l.extend(step("→", ACCENT, None, "Diagnosis", "Collecting evidence…", w));
-            return l;
-        }
-        "INSUFFICIENT_EVIDENCE" => {
-            l.extend(step("✗", WARNING, clock_of(i, &["DIAGNOSED"]), "Diagnosis", "Not enough evidence to name a cause. Nothing is proposed.", w));
-            return l;
-        }
-        _ => {}
-    }
-    // the cause statement arrives with the full incident, a poll after the list
-    let diagnosis = i.rca.as_ref().and_then(|r| r.root_cause.as_ref()).map(|c| c.statement.clone());
-    l.extend(step("✓", HEALTHY, clock_of(i, &["DIAGNOSED"]), "Diagnosis",
-                  &diagnosis.unwrap_or_else(|| "Loading the details…".into()), w));
-    let action = match i.proposal.as_ref().map(|p| p.action.as_str()).or_else(|| app.proposed_action(&i.incident_id)) {
-        Some(a) => words::action_phrase(a),
-        None => "A recovery action".to_string(),
-    };
-    if matches!(status, "PROPOSED" | "POLICY_CHECK") {
-        l.extend(step("!", WARNING, clock_of(i, &["PROPOSED", "POLICY_CHECK"]), "Recovery proposed", &action, w));
-        for e in i.evidence.iter().filter(|e| e.relation == "supports") {
-            if let Some(sentence) = words::evidence_sentence(e) {
-                l.extend(note(&format!("• {sentence}"), w));
-            }
-        }
-        l.extend(note("Restart is an allowlisted recovery action; it runs only after you approve.", w));
-        l.push(Line::from(vec![plain(" ".repeat(STEP_INDENT)), bold("Needs your OK", WARNING), muted("   Enter  Review and decide")]));
-        return l;
-    }
-    l.extend(step("✓", HEALTHY, clock_of(i, &["PROPOSED", "POLICY_CHECK"]), "Recovery proposed", &action, w));
-    match status {
-        "REJECTED" => {
-            l.extend(step("✗", theme::TEXT_MUTED, clock_of(i, &["REJECTED"]), "You declined", "Nothing was restarted.", w));
-            return l;
-        }
-        "CLEARED" => {
-            l.extend(step("–", theme::TEXT_MUTED, clock_of(i, &["CLEARED"]), "No longer needed",
-                          "The problem went away before it was acted on. Nothing was restarted.", w));
-            return l;
-        }
-        _ => {}
-    }
-    l.extend(step("✓", HEALTHY, clock_of(i, &["APPROVED"]), "You approved", "", w));
-    if matches!(status, "APPROVED" | "EXECUTING") {
-        l.extend(step("→", ACCENT, clock_of(i, &["EXECUTING"]), "Recovering", "The server is restarting the workload…", w));
-        return l;
-    }
-    if status == "EXECUTION_FAILED" {
-        l.extend(step("✗", CRITICAL, clock_of(i, &["EXECUTION_FAILED"]), "Recovery failed", "The restart could not be carried out.", w));
-        return l;
-    }
-    l.extend(step("✓", HEALTHY, clock_of(i, &["EXECUTING"]), "Recovered", "The workload was restarted.", w));
-    if status == "VERIFYING" {
-        l.extend(step("→", ACCENT, clock_of(i, &["VERIFYING"]), "Verifying", "Waiting for the server's result.", w));
-        return l;
-    }
-    let required = i.verification.as_ref().and_then(|v| v.required_completions);
-    let checks = i.verification.as_ref().and_then(|v| v.checks.as_ref()).filter(|c| !c.is_empty());
-    let (glyph, color, title) = if status == "RESOLVED" { ("✓", HEALTHY, "Verified") } else { ("✗", CRITICAL, "Verification failed") };
-    l.extend(step(glyph, color, clock_of(i, &["RESOLVED", "UNRESOLVED"]), title, "", w));
-    if let Some(checks) = checks {
-        let mut keys: Vec<&String> = checks.keys().collect();
-        keys.sort_by_key(|k| (CHECK_ORDER.iter().position(|c| c == k).unwrap_or(99), (*k).clone()));
-        for k in keys {
-            l.push(Line::from(vec![plain(" ".repeat(STEP_INDENT)), mark(Some(checks[k])), plain(format!(" {}", words::check_phrase(k, required)))]));
-        }
-    } else if status == "RESOLVED" {
-        l.extend(note("Loading the recorded checks…", w));
-    }
-    l.push(blank());
-    l.push(Line::from(vec![plain(" "), if status == "RESOLVED" { bold("INCIDENT RESOLVED", HEALTHY) } else { bold("NOT RESOLVED", CRITICAL) }]));
-    l
-}

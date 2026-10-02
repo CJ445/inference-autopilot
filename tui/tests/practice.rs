@@ -289,8 +289,8 @@ fn the_banner_says_when_a_screen_shows_the_real_system() {
 fn the_overview_guides_the_operator_from_the_servers_stage() {
     for (stage, text) in [
         ("healthy", "The simulated model is healthy. The test is about to break it"),
-        ("detecting", "needs two failed checks in a row"),
-        ("awaiting_approval", "Open the incident (Enter), review it, then approve (A)."),
+        ("detecting", "The detector needs two failed"),
+        ("awaiting_approval", "A restart was proposed. Open the incident (Enter)"),
         ("recovering", "Restarting and verifying the recovery"),
         ("resolved", "Recovered and verified (simulated)."),
         ("rejected", "The incident closed as rejected."),
@@ -307,7 +307,7 @@ fn a_practice_overview_shows_simulated_values_and_no_real_safety_state() {
     p.handle_key(key('1'));
     p.details = true;                                   // the technical view carries the safety section
     let s = screen(&p);
-    for needle in ["simulated session", "sim/opt-125m", "Simulated session: there is nothing real to protect.",
+    for needle in ["simulated", "sim/opt-125m", "Simulated session: there is nothing real to protect.",
                    "AUDIT ✓ VERIFIED (8 events, simulated)"] {
         has(&s, needle);
     }
@@ -330,26 +330,22 @@ fn the_footer_offers_the_recovery_test_and_its_own_keys() {
     for needle in ["F Break it", "R Run again", "Esc Leave test"] {
         has(foot, needle);
     }
-    // F is shown inactive once the model is no longer healthy
-    let broken = quiet("detecting");
-    let buf = ui::render_to_buffer(&broken, 190, 40);
-    let w = buf.area.width as usize;
-    let row = buf.area.height as usize - 1;
-    let line: String = (0..w).map(|x| buf.content()[row * w + x].symbol().to_string()).collect();
-    let at = line.find("F Break it").expect("F is still listed");
-    assert_eq!(buf.content()[row * w + line[..at].chars().count()].fg, theme::TEXT_MUTED);
+    // F is only offered while the model is still healthy (the manual retry); after that it is gone
+    let broken = ui::render_to_string(&quiet("detecting"), 190, 40);
+    lacks(broken.lines().last().unwrap(), "F Break it");
+    has(broken.lines().last().unwrap(), "R Run again");
 }
 
 #[test]
 fn the_real_home_with_nothing_wrong_points_at_the_recovery_test() {
     let s = screen(&real_app());
-    has(&s, "No active incidents.");
-    has(&s, "Want to see the recovery loop?");
-    has(&s, "[R] Run a recovery test");
+    has(&s, "WHEN SOMETHING GOES WRONG");
+    has(&s, "Run a recovery test to watch it detect, diagnose and recover.");   // the anchored bar says what to do next
+    has(s.lines().last().unwrap(), "R Run test");
     let mut running = practicing("healthy");
     running.handle_key(key('1'));
-    lacks(&screen(&running), "Run a recovery test");   // while testing it says "Run the test again"
-    has(&screen(&running), "[R] Run the test again");
+    lacks(&screen(&running), "Run a recovery test to watch it");   // while testing it does not suggest starting one
+    has(running.handle_key(key('1')).is_empty().then(|| screen(&running)).unwrap().lines().last().unwrap(), "R Run again");
     // the technical view says the same
     let mut tech = real_app();
     tech.details = true;

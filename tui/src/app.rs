@@ -95,6 +95,8 @@ pub enum Command {
     Lab,
     Audit,
     System,
+    Panel,
+    Evidence,
     Help,
     Refresh,
     StopControlPlane,
@@ -114,13 +116,15 @@ pub struct Offer {
     pub can_break: bool,
     /// A real fault is active and can be ended now.
     pub can_resume: bool,
+    /// An incident is waiting for the operator's decision.
+    pub awaiting: bool,
 }
 
 /// How long the paused workload is told to stay paused at most (the server bounds this too).
 pub const FAULT_SECONDS: u32 = 120;
 
 impl Command {
-    pub const ALL: [Command; 14] = [
+    pub const ALL: [Command; 16] = [
         Command::Practice,
         Command::BreakWorkload,
         Command::Incidents,
@@ -128,6 +132,8 @@ impl Command {
         Command::Lab,
         Command::Overview,
         Command::System,
+        Command::Evidence,
+        Command::Panel,
         Command::ToggleDetails,
         Command::StopControlPlane,
         Command::ExitPractice,
@@ -152,7 +158,41 @@ impl Command {
             Command::BreakWorkload => "Inject a real fault (pause the workload)…",
             Command::ResumeWorkload => "Resume the workload now",
             Command::ToggleDetails => "Show technical details",
+            Command::Evidence => "Show or hide the evidence",
+            Command::Panel => "Show or hide the workload panel",
             Command::Quit => "Quit",
+        }
+    }
+}
+
+impl Command {
+    /// The group a command is listed under in the palette.
+    pub fn category(self) -> &'static str {
+        match self {
+            Command::Practice | Command::BreakWorkload | Command::ExitPractice | Command::ResumeWorkload => "Test",
+            Command::Overview | Command::Incidents | Command::Lab | Command::Audit | Command::System => "Go to",
+            Command::Evidence | Command::Panel | Command::ToggleDetails => "View",
+            Command::Refresh | Command::StopControlPlane | Command::Help | Command::Quit => "System",
+        }
+    }
+
+    /// The key that does the same thing, shown at the right of its row (empty when there is none).
+    pub fn shortcut(self) -> &'static str {
+        match self {
+            Command::Practice => "R",
+            Command::BreakWorkload => "F",
+            Command::Overview => "1",
+            Command::Incidents => "2",
+            Command::Lab => "3",
+            Command::Audit => "4",
+            Command::System => "5",
+            Command::Evidence => "E",
+            Command::Panel => "W",
+            Command::ToggleDetails => "D",
+            Command::Refresh => "S",
+            Command::Help => "?",
+            Command::Quit => "Q",
+            Command::ExitPractice | Command::ResumeWorkload | Command::StopControlPlane => "",
         }
     }
 }
@@ -168,19 +208,42 @@ impl Palette {
     pub fn matches(&self, offer: Offer) -> Vec<Command> {
         let q = self.query.to_lowercase();
         let words: Vec<&str> = q.split_whitespace().collect();
-        Command::ALL
-            .into_iter()
-            .filter(|c| match c {
-                Command::ExitPractice => offer.practicing,
-                Command::BreakWorkload => offer.can_break,
-                Command::ResumeWorkload => offer.can_resume,
-                _ => true,
-            })
-            .filter(|c| {
-                let label = c.label().to_lowercase();
-                words.iter().all(|w| label.contains(w))
-            })
-            .collect()
+        let available = |c: &Command| match c {
+            Command::ExitPractice => offer.practicing,
+            Command::BreakWorkload => offer.can_break,
+            Command::ResumeWorkload => offer.can_resume,
+            _ => true,
+        };
+        let mut all: Vec<Command> = Command::ALL.into_iter().filter(available).collect();
+        // grouped by category, in a stable order
+        let order = ["Test", "Go to", "View", "System"];
+        all.sort_by_key(|c| order.iter().position(|o| *o == c.category()).unwrap_or(9));
+        if words.is_empty() {
+            // the suggestions for this situation come first
+            let suggested = Palette::suggested(offer);
+            let mut out: Vec<Command> = suggested.clone();
+            out.extend(all.into_iter().filter(|c| !suggested.contains(c)));
+            return out;
+        }
+        all.into_iter().filter(|c| { let label = c.label().to_lowercase(); words.iter().all(|w| label.contains(w)) }).collect()
+    }
+
+    /// What is most likely wanted right now (listed first when nothing has been typed).
+    pub fn suggested(offer: Offer) -> Vec<Command> {
+        let mut s = if offer.can_resume {
+            vec![Command::ResumeWorkload, Command::Incidents]
+        } else if offer.practicing {
+            vec![Command::ExitPractice, Command::Incidents]
+        } else if offer.awaiting {
+            vec![Command::Incidents, Command::Evidence]
+        } else {
+            vec![Command::Practice, Command::BreakWorkload, Command::Incidents]
+        };
+        s.retain(|c| match c {
+            Command::BreakWorkload => offer.can_break,
+            _ => true,
+        });
+        s
     }
 }
 
@@ -350,6 +413,19 @@ pub struct App {
     /// The server refused an approval because the problem was gone (D-14): said in a dialog, not
     /// in a line that fades, so that "nothing was restarted" is read.
     pub refusal: Option<String>,
+    /// When the app started: drives the spinner (a frame every 80 ms).
+    pub started: Instant,
+    /// Show the evidence under every stage of the stream (E), not only the one the loop is at.
+    pub expanded: bool,
+    /// The workload panel: `None` is automatic (open when the terminal is wide), `Some` is the operator's choice.
+    pub panel: Option<bool>,
+    /// The row the cursor is on in the Lab's list of tests.
+    pub lab_cursor: usize,
+    /// Reduced motion: no spinner animation (a static `⋯`).
+    pub reduce_motion: bool,
+    /// The terminal's width in columns, as last drawn (the event loop sets it): the workload panel
+    /// opens by itself only on a wide terminal, so W needs to know which way to toggle.
+    pub width: u16,
     /// The action the server proposed for each incident, remembered from earlier polls: once an
     /// incident is approved the server no longer lists its proposal, but the story still names it.
     actions: std::collections::HashMap<String, String>,
@@ -395,6 +471,12 @@ impl App {
             stop_opened: Instant::now(),
             fault_confirm: false,
             refusal: None,
+            started: Instant::now(),
+            expanded: false,
+            panel: None,
+            lab_cursor: 0,
+            reduce_motion: false,
+            width: 120,
             actions: std::collections::HashMap::new(),
             fault_opened: Instant::now(),
             stop_sent: None,
@@ -457,7 +539,7 @@ impl App {
             detail_id: match &self.screen {
                 Screen::Detail(id) => Some(id.clone()),
                 // the recovery test's story needs the recorded checks of its incident
-                Screen::Lab if self.practice => self.rows().first().map(|i| i.incident_id.clone()),
+                Screen::Lab | Screen::Dashboard => self.decision_target(),
                 _ => None,
             },
             want_audit: self.screen == Screen::Audit,
@@ -556,7 +638,14 @@ impl App {
             KeyCode::PageUp => self.step(-8),
             KeyCode::PageDown => self.step(8),
             KeyCode::Enter => {
-                if matches!(self.screen, Screen::Dashboard | Screen::Incidents | Screen::Lab) {
+                if self.screen == Screen::Lab && !self.practice && self.active_fault().is_none() {
+                    // the Lab's list: Enter runs the test the cursor is on
+                    if self.lab_cursor == 0 {
+                        fx = self.begin_practice();
+                    } else {
+                        self.begin_fault();
+                    }
+                } else if matches!(self.screen, Screen::Dashboard | Screen::Incidents | Screen::Lab) {
                     if let Some(id) = self.selected_incident().map(|i| i.incident_id.clone()) {
                         self.back = self.screen.clone();
                         self.screen = Screen::Detail(id);
@@ -574,6 +663,8 @@ impl App {
                 _ => fx = self.go(Screen::Dashboard),
             },
             KeyCode::Char('i') | KeyCode::Char('I') => fx = self.go(Screen::Incidents),
+            KeyCode::Char('e') | KeyCode::Char('E') => self.expanded = !self.expanded,
+            KeyCode::Char('w') | KeyCode::Char('W') => self.panel = Some(!self.panel_open(self.width)),
             KeyCode::Char('f') | KeyCode::Char('F') if self.practice => fx = self.inject_fault(),
             // F opens the real-fault DIALOG (nothing is sent until Enter after the guard), and only
             // on the screens that show the action, so a stray F elsewhere does nothing.
@@ -582,12 +673,8 @@ impl App {
             }
             // A and R decide an incident only on its page (the Incidents list explains); on the
             // other screens they are the quick actions: Activity, and run a recovery test.
-            KeyCode::Char('a') | KeyCode::Char('A') if matches!(self.screen, Screen::Detail(_) | Screen::Incidents) => {
-                self.begin(ActionKind::Approve)
-            }
-            KeyCode::Char('r') | KeyCode::Char('R') if matches!(self.screen, Screen::Detail(_) | Screen::Incidents) => {
-                self.begin(ActionKind::Reject)
-            }
+            KeyCode::Char('a') | KeyCode::Char('A') if self.decides_here() => self.begin(ActionKind::Approve),
+            KeyCode::Char('r') | KeyCode::Char('R') if self.decides_here() => self.begin(ActionKind::Reject),
             KeyCode::Char('a') | KeyCode::Char('A') => fx = self.go(Screen::Audit),
             KeyCode::Char('r') | KeyCode::Char('R') => fx = self.begin_practice(),
             KeyCode::Char('d') | KeyCode::Char('D') if self.screen == Screen::System => {
@@ -648,6 +735,14 @@ impl App {
         match cmd {
             Command::Overview => self.go(Screen::Dashboard),
             Command::Lab => self.go(Screen::Lab),
+            Command::Panel => {
+                self.panel = Some(!self.panel_open(self.width));
+                Vec::new()
+            }
+            Command::Evidence => {
+                self.expanded = !self.expanded;
+                Vec::new()
+            }
             Command::Incidents => self.go(Screen::Incidents),
             Command::Audit => self.go(Screen::Audit),
             Command::System => self.go(Screen::System),
@@ -688,6 +783,7 @@ impl App {
                 && !self.practice
                 && faults.map_or(false, |f| f.available && f.active.is_none()),
             can_resume: online && !self.practice && faults.map_or(false, |f| f.active.is_some()),
+            awaiting: self.snapshot.as_ref().is_some_and(|s| s.incidents.iter().any(|i| i.status == "POLICY_CHECK")),
         }
     }
 
@@ -808,6 +904,9 @@ impl App {
 
     fn step(&mut self, delta: i32) {
         match self.screen {
+            Screen::Lab if !self.practice && self.active_fault().is_none() => {
+                self.lab_cursor = (self.lab_cursor as i32 + delta).clamp(0, 1) as usize;
+            }
             Screen::Dashboard | Screen::Incidents => {
                 let last = self.rows().len().saturating_sub(1) as i32;
                 self.selected = (self.selected as i32 + delta).clamp(0, last) as usize;
@@ -831,6 +930,36 @@ impl App {
     }
 
     /// Opens a confirmation. Nothing is sent until the operator presses Enter on it.
+    /// The incident a decision key would be about, where the stream of one incident is on screen:
+    /// its own page, Home (the open incident) or the Lab (the test or fault's incident).
+    pub fn decision_target(&self) -> Option<String> {
+        match &self.screen {
+            Screen::Detail(id) => Some(id.clone()),
+            Screen::Dashboard => self.rows().into_iter().find(|i| !is_closed(&i.status)).map(|i| i.incident_id.clone()),
+            // the Lab's menu is not about any incident; its stream (a test or a real fault) is
+            Screen::Lab if self.practice || self.active_fault().is_some() => self.rows().first().map(|i| i.incident_id.clone()),
+            _ => None,
+        }
+    }
+
+    /// A and R decide here only when an incident is on screen that is waiting for a decision (or
+    /// on the Incidents list, where they explain).
+    fn decides_here(&self) -> bool {
+        match &self.screen {
+            Screen::Incidents => true,
+            Screen::Detail(_) => true,
+            Screen::Dashboard | Screen::Lab => self.decision_target().is_some_and(|id| {
+                self.snapshot.as_ref().is_some_and(|s| s.incidents.iter().any(|i| i.incident_id == id && i.status == "POLICY_CHECK"))
+            }),
+            _ => false,
+        }
+    }
+
+    /// Whether the workload panel is open on a terminal `width` columns wide.
+    pub fn panel_open(&self, width: u16) -> bool {
+        self.panel.unwrap_or(width >= 110)
+    }
+
     fn begin(&mut self, kind: ActionKind) {
         if self.busy.is_some() {
             return self.say("an action is already in progress; wait for the server's answer", true);
@@ -838,15 +967,16 @@ impl App {
         if !matches!(self.conn, Conn::Online) {
             return self.say("control plane unreachable: nothing can be approved or rejected", true);
         }
-        let Screen::Detail(id) = &self.screen else {
+        let Some(target) = self.decision_target().filter(|_| !matches!(self.screen, Screen::Incidents)) else {
             return self.say("open the incident (Enter) and review its evidence before deciding", true);
         };
+        let id = &target;
         // The list does not carry the RCA; only the detail does. A decision needs the reason on screen.
         let loaded = self.snapshot.as_ref().and_then(|s| s.detail.as_ref()).is_some_and(|d| &d.incident_id == id);
         if !loaded {
             return self.say("still loading this incident's details; try again in a moment", true);
         }
-        let Some(incident) = self.selected_incident() else {
+        let Some(incident) = self.snapshot.as_ref().and_then(|s| s.detail.as_ref()).filter(|d| &d.incident_id == id) else {
             return self.say("no incident selected", true);
         };
         let Some(proposal) = incident.proposal.as_ref().filter(|_| incident.status == "POLICY_CHECK") else {

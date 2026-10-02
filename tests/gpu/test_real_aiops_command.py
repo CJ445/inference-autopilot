@@ -40,7 +40,7 @@ def test_bare_aiops_starts_attaches_and_stops_the_real_control_plane(vllm, tmp_p
         # -- first `aiops`: nothing is running, so it starts the real control plane ------------
         t = Pty([AIOPS, "--config", str(c.cfg)], env_for(tui_bin), rows=52, cols=132)
         try:
-            assert t.wait_screen("● CONTROL ONLINE", timeout=120)
+            assert t.wait_screen("● online", timeout=120)
             assert t.wait_screen("✓ HEALTHY", timeout=60)               # plain by default
             assert t.wait_screen("✓ WATCHING")
             t.send(b"d")                                                # then the technical view
@@ -68,7 +68,7 @@ def test_bare_aiops_starts_attaches_and_stops_the_real_control_plane(vllm, tmp_p
         # -- second `aiops`: attaches; still exactly one control plane --------------------------
         t = Pty([AIOPS, "--config", str(c.cfg)], env_for(tui_bin), rows=52, cols=132)
         try:
-            assert t.wait_screen("● CONTROL ONLINE", timeout=60)
+            assert t.wait_screen("● online", timeout=60)
             assert "Starting control plane" not in t.vs.text()
             assert lifecycle.read_state(c.state)["pid"] == pid
             assert len(processes("aiops start --config", str(c.cfg))) == 1

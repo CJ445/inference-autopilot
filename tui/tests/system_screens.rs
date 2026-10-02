@@ -30,11 +30,12 @@ fn app() -> App {
 fn screen(a: &App) -> String {
     ui::render_to_string(a, 120, 200)   // System is one tall scroll of four sections
 }
+// Section headings are small-caps labels now (`CONTROL PLANE`), so these compare without case.
 fn has(s: &str, needle: &str) {
-    assert!(s.contains(needle), "missing {needle:?} in:\n{s}");
+    assert!(s.to_lowercase().contains(&needle.to_lowercase()), "missing {needle:?} in:\n{s}");
 }
 fn lacks(s: &str, needle: &str) {
-    assert!(!s.contains(needle), "unexpected {needle:?} in:\n{s}");
+    assert!(!s.to_lowercase().contains(&needle.to_lowercase()), "unexpected {needle:?} in:\n{s}");
 }
 
 fn config() -> ConfigInfo {
@@ -205,7 +206,7 @@ fn stop_needs_x_then_an_explicit_enter_and_sends_exactly_one_request() {
     a.handle_key(key('5'));
     assert!(a.handle_key(key('x')).is_empty() && a.stop_confirm);
     let s = screen(&a);
-    for needle in ["Stop control plane?", "operator UI will disconnect", "managed workload is not touched", "[Enter] Stop", "[Esc] Cancel"] {
+    for needle in ["Stop the control plane?", "operator UI will disconnect", "managed workload is not touched", "[Enter] Stop", "[Esc] Cancel"] {
         has(&s, needle);
     }
     assert!(a.handle_key(key('q')).is_empty(), "other keys cannot confirm or quit");
@@ -345,7 +346,7 @@ fn the_palette_offers_no_approve_reject_restart_or_remediation_command() {
             assert!(!l.contains(forbidden), "{l}");
         }
         if l.contains("workload") {
-            assert!(matches!(c, Command::BreakWorkload | Command::ResumeWorkload), "{l}");
+            assert!(matches!(c, Command::BreakWorkload | Command::ResumeWorkload | Command::Panel), "{l}");
         }
     }
 }
@@ -398,31 +399,30 @@ fn help_lists_exactly_the_keys_that_work() {
 }
 
 #[test]
-fn the_navigation_strip_lists_the_five_areas_and_brackets_the_current_one() {
+fn the_navigation_strip_lists_the_five_spaces_and_marks_the_current_one() {
     let mut a = app();
     a.handle_key(key('5'));
     let s = screen(&a);
     let nav = s.lines().nth(1).unwrap().to_string();
-    for needle in ["1 Home", "2 Incidents", "3 Lab", "4 Activity", "[5 System]"] {
+    for needle in ["Overview", "Incidents", "Lab", "Activity", "▸ System"] {
         assert!(nav.contains(needle), "{needle} in {nav}");
     }
-    // the old sidebar and its names are gone
-    for old in ["OVERVIEW", "AUDIT", "Control Plane", "OPERATOR", "Settings", "▌"] {
-        assert!(!nav.contains(old), "{old}");
+    // the old sidebar, its numbers and its brackets are gone
+    for old in ["OVERVIEW", "AUDIT", "Control Plane", "OPERATOR", "Settings", "▌", "[5", "1 Home"] {
+        assert!(!nav.contains(old), "{old} in {nav}");
     }
-    assert_eq!(nav.matches('[').count(), 1, "exactly one area is current");
-    // each key brackets its own area
-    for (k, name) in [('1', "[1 Home]"), ('2', "[2 Incidents]"), ('3', "[3 Lab]"), ('4', "[4 Activity]")] {
+    assert_eq!(nav.matches('▸').count(), 1, "exactly one space is current");
+    // each key marks its own space
+    for (k, name) in [('1', "▸ Overview"), ('2', "▸ Incidents"), ('3', "▸ Lab"), ('4', "▸ Activity")] {
         a.handle_key(key(k));
         let nav = screen(&a).lines().nth(1).unwrap().to_string();
         assert!(nav.contains(name), "{k}: {nav}");
     }
-    // Help is not one of the five areas, but is marked when it is the current screen
+    // Help is not one of the five spaces, but is marked when it is the current screen
     a.handle_key(key('?'));
     let nav = screen(&a).lines().nth(1).unwrap().to_string();
-    assert!(nav.contains("[? Help]"), "{nav}");
+    assert!(nav.contains("▸ Help"), "{nav}");
 }
-
 #[test]
 fn system_holds_the_control_plane_diagnostics_configuration_and_about_in_that_order() {
     let mut a = app();
@@ -432,8 +432,8 @@ fn system_holds_the_control_plane_diagnostics_configuration_and_about_in_that_or
     a.apply(Msg::Loaded(Loaded::Diagnostics(Ok(diagnostics()))));
     let s = screen(&a);
     let at = |n: &str| s.find(n).unwrap_or_else(|| panic!("missing {n:?} in:\n{s}"));
-    let order = [at("Control plane"), at("[ X ] Stop control plane"), at("Diagnostics"), at("Client"),
-                 at("Control plane configuration"), at("About")];
+    let order = [at("CONTROL PLANE"), at("[ X ] Stop control plane"), at("DIAGNOSTICS"), at("CLIENT"),
+                 at("CONTROL PLANE CONFIGURATION"), at("ABOUT")];
     assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
 }
 
@@ -500,7 +500,7 @@ fn with_workload(state: Option<&str>, observation: bool) -> App {
 fn an_absent_workload_says_so_and_shows_no_workload_telemetry() {
     let s = screen(&with_workload(Some("absent"), false));
     for needle in ["○ NO WORKLOAD", "No workload running", "nothing is observed", "picked up automatically",
-                   "● CONTROL ONLINE", "No active incidents", "No observation"] {
+                   "● online", "No active incidents", "No observation"] {
         has(&s, needle);
     }
     for invented in ["● HEALTHY", "✗ UNRESPONSIVE", "Probe", "Metrics", "KV cache", "Running 0", "35.4%"] {

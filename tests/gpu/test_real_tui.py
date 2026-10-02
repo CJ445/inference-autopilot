@@ -48,7 +48,7 @@ def test_the_operator_tui_drives_a_real_remediation_end_to_end(vllm, tmp_path, t
         t = Term(tui_bin, f"http://127.0.0.1:{c.port}", rows=52, cols=132)
         try:
             # -- healthy: real GPU, real vLLM, real safety state, all from the API -------------
-            assert t.wait_screen("● CONTROL ONLINE", timeout=30)
+            assert t.wait_screen("● online", timeout=30)
             # the default view is plain, from the same real telemetry ...
             for needle in ["✓ HEALTHY", "Probe", "Memory", "% of", "✓ WATCHING", "No active incidents."]:
                 assert t.wait_screen(needle, timeout=20), needle

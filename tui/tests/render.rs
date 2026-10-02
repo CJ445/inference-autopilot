@@ -49,11 +49,12 @@ fn ch(app: &mut App, c: char) {
 fn text(app: &App, w: u16, h: u16) -> String {
     ui::render_to_string(app, w, h)
 }
+// Section headings are small-caps labels now (`DETERMINISTIC RCA`), so these compare without case.
 fn has(screen: &str, needle: &str) {
-    assert!(screen.contains(needle), "missing {needle:?} in:\n{screen}");
+    assert!(screen.to_lowercase().contains(&needle.to_lowercase()), "missing {needle:?} in:\n{screen}");
 }
 fn lacks(screen: &str, needle: &str) {
-    assert!(!screen.contains(needle), "unexpected {needle:?} in:\n{screen}");
+    assert!(!screen.to_lowercase().contains(&needle.to_lowercase()), "unexpected {needle:?} in:\n{screen}");
 }
 /// Foreground colour of the first cell of `needle` (rendered on one row).
 fn colour_of(buf: &Buffer, needle: &str) -> Color {
@@ -76,12 +77,12 @@ fn a_healthy_dashboard_shows_real_gpu_vllm_control_plane_and_safety_state() {
     let a = app(HEALTHY, vec![]);       // `app` renders the technical view (D)
     let s = text(&a, 110, 32);
     for needle in [
-        "INFERENCE AUTOPILOT", "● CONTROL ONLINE", "docker-real-gpu", "GPU 0", "GPU-1e5dd8d1", "VRAM",
+        "INFERENCE AUTOPILOT", "● online", "docker-real-gpu", "GPU 0", "GPU-1e5dd8d1", "VRAM",
         "35.4%", "2.8 / 8.0 GiB", "59°C", "UTIL 23%", "vLLM · facebook/opt-125m", "● HEALTHY",
         "Probe ✓", "18 ms", "Metrics ✓", "KV cache 0.0%", "Running 0", "Waiting 0",
         "No active incidents", "WATCHDOG", "● ARMED", "Identity ✓", "Budgets ✓",
-        "AUDIT ✓ VERIFIED", "Observed 1.0s ago", "1 Home", "2 Incidents", "3 Lab", "4 Activity", "5 System",
-        "Commands", "Quit",
+        "AUDIT ✓ VERIFIED", "Observed 1.0s ago", "Overview", "Incidents", "Lab", "Activity", "System",
+        "Commands", "Help",
     ] {
         has(&s, needle);
     }
@@ -111,8 +112,8 @@ fn a_degraded_control_plane_is_not_shown_as_running() {
     let mut st = status(HEALTHY);
     st.health = "DEGRADED".into();
     let s = text(&app_with(Snapshot::new(st, vec![])), 110, 32);
-    has(&s, "! DEGRADED");
-    lacks(&s, "● CONTROL ONLINE");
+    has(&s, "! degraded");
+    lacks(&s, "● online");
 }
 
 #[test]
@@ -215,7 +216,7 @@ fn detail_app(json: &str) -> App {
 
 #[test]
 fn a_pending_incident_detail_shows_evidence_rca_proposal_policy_and_no_verification() {
-    let s = text(&detail_app(PENDING), 110, 60);
+    let s = text(&detail_app(PENDING), 110, 90);
     for needle in [
         "inc_001", "INFERENCE_UNRESPONSIVE", "vllm", "Evidence", "Inference probe",
         "FAILED (timeout)", "vllm-probe", "GPU memory", "2.8 GiB used", "vLLM metrics", "UNAVAILABLE",
@@ -329,9 +330,9 @@ fn while_the_server_works_the_operator_sees_that_it_is_working_and_what_the_serv
     a.now += std::time::Duration::from_millis(600);
     key(&mut a, KeyCode::Enter);
     let s = text(&a, 110, 40);
-    for needle in ["Waiting for the server", "Approve inc_001 sent", "Server state", "● AWAITING APPROVAL",
+    for needle in ["Waiting for the server", "Approve inc_001 sent", "● AWAITING APPROVAL",
                    "INFERENCE_UNRESPONSIVE", "Evidence"] {
-        has(&s, needle);                       // an inline banner: the incident stays visible
+        has(&s, needle);                       // the bar says it is working: the incident stays visible
     }
     lacks(&s, "In progress");                  // no blocking modal any more
 }
@@ -347,16 +348,16 @@ fn the_banner_follows_the_servers_state_and_never_predicts_it() {
         inc.status = status.into();
         a.apply(Msg::Poll(Ok(Snapshot::new(status_of(UNRESPONSIVE), vec![inc]))));
         let s = text(&a, 110, 40);
-        has(&s, "Waiting for the server");
-        has(&s, &format!("Server state  {shown}"));
+        has(&s, "Waiting for the server…");
+        has(&s, shown);                        // the header chip is the SERVER'S state, never a prediction
     }
     a.apply(Msg::Action { kind: aiops_tui::app::ActionKind::Approve, id: "inc_001".into(),
                           result: Ok(incident(RESOLVED, "inc_001")) });
-    lacks(&text(&a, 110, 40), "Waiting for the server");     // gone when the server has answered
+    lacks(&text(&a, 110, 40), "Waiting for the server…");    // gone when the server has answered
 }
 
 #[test]
-fn a_server_refusal_appears_in_the_footer_in_red() {
+fn a_server_refusal_is_a_toast_with_red_bars() {
     let mut a = app(UNRESPONSIVE, vec![incident(PENDING, "inc_001")]);
     a.apply(Msg::Action {
         kind: aiops_tui::app::ActionKind::Approve,
@@ -365,7 +366,9 @@ fn a_server_refusal_appears_in_the_footer_in_red() {
     });
     let s = text(&a, 130, 32);
     has(&s, "POLICY_DENIED");
-    assert_eq!(colour_of(&ui::render_to_buffer(&a, 130, 32), "Approve failed"), theme::CRITICAL);
+    has(&s, "Approve failed");
+    let buf = ui::render_to_buffer(&a, 130, 32);
+    assert!(buf.content().iter().any(|c| c.symbol() == "┃" && c.fg == theme::CRITICAL), "the toast's bars are red");
 }
 
 // --- watchdog and audit visibility --------------------------------------------------------------
@@ -441,7 +444,7 @@ fn audit_integrity_is_prominent_when_valid_and_alarming_when_not() {
     let bad = app_with(Snapshot::new(st, vec![]));
     let s = text(&bad, 110, 32);
     has(&s, "AUDIT ✗ INTEGRITY FAILURE");
-    has(&s, "Audit ✗");
+    has(&s, "! audit");
     assert_eq!(colour_of(&ui::render_to_buffer(&bad, 110, 32), "AUDIT ✗ INTEGRITY FAILURE"), theme::CRITICAL);
 }
 
@@ -482,8 +485,8 @@ fn the_audit_screen_does_not_hide_an_integrity_failure() {
 fn a_control_plane_that_never_answered_shows_connecting_and_no_invented_values() {
     let a = App::new("http://127.0.0.1:8080".into());
     let s = text(&a, 100, 30);
-    has(&s, "CONNECTING");
-    for invented in ["35.4%", "● CONTROL ONLINE", "HEALTHY", "AUDIT ✓"] {
+    has(&s, "… connecting");
+    for invented in ["35.4%", "● online", "HEALTHY", "AUDIT ✓"] {
         lacks(&s, invented);
     }
 }
@@ -493,10 +496,10 @@ fn an_offline_control_plane_is_shown_not_crashed_on() {
     let mut a = App::new("http://127.0.0.1:8080".into());
     a.apply(Msg::Poll(Err(ApiError::Offline("connection refused".into()))));
     let s = text(&a, 100, 30);
-    has(&s, "CONTROL PLANE OFFLINE");
+    has(&s, "✗ offline");
     has(&s, "Retrying");
     has(&s, "connection refused");
-    assert_eq!(colour_of(&ui::render_to_buffer(&a, 100, 30), "CONTROL PLANE OFFLINE"), theme::CRITICAL);
+    assert_eq!(colour_of(&ui::render_to_buffer(&a, 100, 30), "✗ offline"), theme::CRITICAL);
 }
 
 #[test]
@@ -504,10 +507,10 @@ fn when_the_control_plane_drops_the_last_values_are_kept_but_marked_stale() {
     let mut a = app(HEALTHY, vec![]);
     a.apply(Msg::Poll(Err(ApiError::Timeout)));
     let s = text(&a, 110, 32);
-    has(&s, "CONTROL PLANE OFFLINE");
+    has(&s, "✗ offline");
     has(&s, "STALE");
     has(&s, "35.4%");                  // the last known value, clearly labelled as old
-    lacks(&s, "● CONTROL ONLINE");
+    lacks(&s, "● online");
 }
 
 #[test]
@@ -521,7 +524,7 @@ fn old_telemetry_from_a_running_control_plane_is_flagged() {
 fn a_slow_api_is_called_out() {
     let mut snap = Snapshot::new(status(HEALTHY), vec![]);
     snap.poll_ms = 2600;
-    has(&text(&app_with(snap), 110, 32), "SLOW API");
+    has(&text(&app_with(snap), 110, 32), "slow API");
 }
 
 #[test]
@@ -570,30 +573,46 @@ fn a_gpu_the_profile_does_not_report_is_unknown_not_a_failure() {
 // --- real-terminal findings: narrow footer, long evidence labels, stale provenance -------------
 
 #[test]
-fn the_footer_never_drops_quit_even_in_a_narrow_terminal() {
+fn the_footer_stays_on_one_line_and_keeps_the_most_important_keys_in_a_narrow_terminal() {
     let a = app(HEALTHY, vec![]);
     for w in [72, 76, 90] {
         let s = text(&a, w, 24);
         let footer = s.lines().last().unwrap();
-        assert!(footer.contains("Q Quit"), "no Quit at {w}: {footer:?}");
-        assert!(footer.chars().count() <= w as usize);
+        assert!(footer.chars().count() <= w as usize, "{w}: {footer:?}");
+        assert!(footer.contains("Help") && footer.contains("R Run test"), "{w}: {footer:?}");
+        assert!(footer.contains("watchdog"), "{w}: what protects you is never the part that is dropped: {footer:?}");
     }
 }
 
 #[test]
-fn a_and_r_are_visibly_inactive_unless_the_selected_incident_awaits_a_decision() {
-    let key_colour = |a: &App, k: &str| colour_of(&ui::render_to_buffer(a, 110, 32), k);
+fn quit_is_in_the_palette_and_help_not_in_the_footer() {
+    let mut a = app(HEALTHY, vec![]);
+    assert!(!text(&a, 140, 24).lines().last().unwrap().contains("Quit"));
+    a.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    has(&text(&a, 140, 40), "Quit");
+    a.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    a.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+    has(&text(&a, 140, 40), "Quit");
+}
+#[test]
+fn the_footer_offers_approve_and_reject_only_where_a_decision_is_possible() {
+    let foot = |a: &App| text(a, 130, 32).lines().last().unwrap().to_string();
+    // an incident awaiting a decision, with its details loaded: A and R are offered
     let mut waiting = app(UNRESPONSIVE, vec![incident(PENDING, "inc_001")]);
-    // only the keys that work on a screen are listed: the lists do not offer Approve at all
-    assert!(!text(&waiting, 110, 32).lines().last().unwrap().contains("Approve"), "not offered on the list screens");
-    key(&mut waiting, KeyCode::Enter);                 // on the incident's own page it is live
+    assert!(!foot(&waiting).contains("Approve"), "the list is not where you decide");
+    key(&mut waiting, KeyCode::Enter);
+    let inc = incident(PENDING, "inc_001");
+    let mut snap = Snapshot::new(status(UNRESPONSIVE), vec![inc.clone()]);
+    snap.detail = Some(inc);
+    waiting.apply(Msg::Poll(Ok(snap)));
+    has(&foot(&waiting), "A Approve");
+    has(&foot(&waiting), "R Reject");
+    // a finished incident: nothing to decide, so the keys are not offered at all
     let mut resolved = app(HEALTHY, vec![incident(RESOLVED, "inc_001")]);
     key(&mut resolved, KeyCode::Enter);
-    assert_ne!(key_colour(&waiting, "A Approve"), theme::TEXT_MUTED);
-    assert_eq!(key_colour(&resolved, "A Approve"), theme::TEXT_MUTED);
-    assert_eq!(key_colour(&resolved, "R Reject"), theme::TEXT_MUTED);
+    lacks(&foot(&resolved), "Approve");
+    lacks(&foot(&resolved), "Reject");
 }
-
 #[test]
 fn a_long_evidence_label_never_runs_into_its_value() {
     let mut inc = incident(PENDING, "inc_001");

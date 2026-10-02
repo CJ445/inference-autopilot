@@ -80,7 +80,7 @@ def test_aiops_attaches_to_a_running_control_plane_opens_the_tui_and_leaves_it_r
 
     t = Pty([str(ROOT / "bin" / "aiops"), "--config", str(config)], env_for(tui_bin))
     try:
-        assert t.wait_screen("INFERENCE AUTOPILOT") and t.wait_screen("● CONTROL ONLINE")
+        assert t.wait_screen("INFERENCE AUTOPILOT") and t.wait_screen("● online")
         assert "Starting control plane" not in t.vs.text()       # attached: nothing was started
         assert state_of(profile)["pid"] == pid                    # still the one control plane
         t.send(b"q")

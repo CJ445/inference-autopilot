@@ -110,7 +110,11 @@ fn enter_inspects_the_selected_incident_and_esc_goes_back() {
     assert_eq!(app.interest().detail_id.as_deref(), Some("inc_001"));
     app.handle_key(code(KeyCode::Esc));
     assert!(matches!(app.screen, Screen::Dashboard));
-    assert_eq!(app.interest().detail_id, None);
+    // Home shows the open incident's stream, so it asks for its details too (the decision needs them)
+    assert_eq!(app.interest().detail_id.as_deref(), Some("inc_001"));
+    // with nothing open there is nothing to fetch
+    let calm = online(HEALTHY, vec![]);
+    assert_eq!(calm.interest().detail_id, None);
 }
 
 #[test]
@@ -445,12 +449,24 @@ fn a_and_r_on_the_incident_list_only_explain_and_elsewhere_they_never_decide() {
         let n = app.active_notice().expect("it says why");
         assert!(n.text.contains("open the incident") && n.is_error, "{}", n.text);
     }
-    // Home (and the other areas): they are quick actions, and never open a decision
+    // Home with NOTHING waiting: they are quick actions (Activity, run a recovery test) and never decide
+    let mut calm = online(HEALTHY, vec![]);
+    assert!(calm.handle_key(key('a')).is_empty() && matches!(calm.screen, Screen::Audit) && calm.confirm.is_none());
+    let mut calm = online(HEALTHY, vec![]);
+    assert_eq!(calm.handle_key(key('r')), vec![Effect::StartPractice]);
+    assert!(calm.confirm.is_none() && calm.busy.is_none());
+    // Home with an incident waiting IS its stream: A and R are the decision keys, and they only
+    // open the two-step request once the incident's full details have loaded
     let mut app = with_pending();
-    assert!(app.handle_key(key('a')).is_empty() && matches!(app.screen, Screen::Audit) && app.confirm.is_none());
-    let mut app = with_pending();
-    assert_eq!(app.handle_key(key('r')), vec![Effect::StartPractice]);       // runs a recovery test
-    assert!(app.confirm.is_none() && app.busy.is_none(), "R on Home never rejects an incident");
+    assert!(app.handle_key(key('a')).is_empty() && matches!(app.screen, Screen::Dashboard) && app.confirm.is_none());
+    assert!(app.active_notice().unwrap().text.contains("still loading"), "{:?}", app.active_notice().map(|n| &n.text));
+    assert!(app.handle_key(key('r')).is_empty() && app.confirm.is_none(), "not before the details are here");
+    let inc = incident(PENDING, "inc_001");
+    let mut snap = snapshot(UNRESPONSIVE, vec![inc.clone()]);
+    snap.detail = Some(inc);                         // the full incident has arrived
+    app.apply(Msg::Poll(Ok(snap)));
+    assert!(app.handle_key(key('a')).is_empty(), "opening the request sends nothing");
+    assert!(app.confirm.is_some(), "now it opens the request");
 }
 
 #[test]
