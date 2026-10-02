@@ -248,7 +248,8 @@ def test_aiops_does_not_launch_the_tui_when_startup_fails(tmp_path, monkeypatch)
     fake_bin = tmp_path / "aiops-tui"
     fake_bin.write_text("#!/bin/sh\n")
     monkeypatch.setenv("AIOPS_TUI_BIN", str(fake_bin))
-    code = launcher.main([], out=Out(), isatty=lambda: True, ensure=lambda c, out: (1, None),
+    code = launcher.main(["--config", "x.toml"], out=Out(), isatty=lambda: True,
+                         ensure=lambda c, out: (1, None),
                          tui_exec=lambda *a: pytest.fail("a broken start must not open the UI"))
     assert code == 1
 

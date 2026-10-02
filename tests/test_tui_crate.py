@@ -23,8 +23,9 @@ def test_the_tui_crates_own_test_suite_passes():
 def test_the_lockfile_is_present_and_satisfies_a_locked_offline_build_of_the_host():
     assert (MANIFEST.parent / "Cargo.lock").exists()
     r = subprocess.run(["cargo", "tree", "--locked", "--offline", "--manifest-path",
-                        str(MANIFEST), "--depth", "1"], capture_output=True, text=True,
+                        str(MANIFEST), "--depth", "1", "--prefix", "none"], capture_output=True, text=True,
                        timeout=120)
     assert r.returncode == 0, r.stderr[-2000:]
-    direct = {line.split()[1] for line in r.stdout.splitlines() if line[:1] in "├└"}
+    # --prefix none: one dependency per line (the root first), whatever the locale or charset
+    direct = {line.split()[0] for line in r.stdout.splitlines()[1:] if line.strip()}
     assert direct == {"ratatui", "crossterm", "serde", "serde_json"}, direct
