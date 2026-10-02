@@ -639,6 +639,13 @@ def test_a_recovery_test_is_one_key_and_walks_the_whole_loop_without_touching_th
 def test_the_real_fault_needs_an_explicit_confirmation_and_is_visible_until_it_ends(term, cp):
     t = term(cp.url, rows=36, cols=130)
     assert t.wait_screen("inc_001")
+    # a real fault is for a calm system: while the stand-in's incident is open it is not even offered
+    t.send(b"f")
+    t.pump(0.5)
+    assert "REAL INFRASTRUCTURE FAULT" not in t.screen()
+    cp.world.fault = False                           # the stand-in world recovers on its own ...
+    cp.engine.reject("inc_001")                      # ... and the operator declines the stale incident: calm
+    assert t.wait_screen("F Inject fault")
     docker = cp.fault_docker
 
     def open_dialog(via_f=False):

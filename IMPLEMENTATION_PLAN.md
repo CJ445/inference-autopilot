@@ -141,3 +141,11 @@ test (the TUI asks for the simulated fault once the server reports healthy); a s
 server-reported state and the incident timeline; one seven-stage pipeline on Home, the incident page
 and the Lab; recovery-request, real-fault and "recovery no longer needed" dialogs that never lose their
 decision line on a small terminal. No backend, API, state-machine, policy or verification change.
+
+### Phase 9: the TUI as a terminal application (UI/UX only; D-16)
+
+Studied OpenCode's actual TUI source for its interaction model: a stream that sticks to the newest, an
+anchored action surface, a quiet footer with status dots, a toggleable context panel, a command
+registry behind the palette, tonal overlays over a dimmed screen, toasts. Applied to autonomous
+inference SRE with its own identity (a cool tonal palette, a teal signal accent, the vertical spine of
+the recovery loop). No backend, API, state-machine, policy or verification change.

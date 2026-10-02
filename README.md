@@ -118,47 +118,59 @@ That is the normal way in. It looks for a running control plane for the profile:
   daemon that is down; the watchdog could not arm; the port is taken; the state file is unreadable, or it did not answer in time) → prints the reason and
   the last lines of its output and exits non-zero. The TUI is not opened over a broken start.
 
-Quitting the TUI (`Q`) leaves the control plane running. To stop it, use the TUI's *System* area
-(`5`, then `X`, then Enter) or, from a shell, `aiops stop`.
+Quitting the TUI (`Q`, also in the palette and Help) leaves the control plane running. To stop it,
+use the *System* space (`5`, then `X`, then Enter) or, from a shell, `aiops stop`.
 
-What you see first is plain language: "✓ HEALTHY", "✓ WATCHING", "Your model stopped answering",
-"Needs your OK". Press **`D`** for the technical view of the same screen (exact incident categories,
-raw states, evidence sources, probe results, GPU and vLLM metrics, audit hashes); `D` again goes
-back. `aiops-tui --once --details` prints that technical frame for scripts. The header always says
-which world you are in: `LIVE · GPU-REAL` (a real GPU reading is present), `LIVE`, or `SIMULATION`.
+**What the screen is.** The TUI is an application you operate, not a dashboard. Its centre is a
+**stream**: the recovery loop for an incident as it happens, one block per stage
+(`DETECTED`, `DIAGNOSED`, `RECOVERY READY`, `APPROVED`, `RECOVERING`, `VERIFYING`, `VERIFIED`), each with a
+bar at its left edge. A block appears only when the server reports that stage; finished ones collapse
+to a line, the one the loop is at is open, and the view sticks to the newest. Below it an **anchored
+bar** always says, in a sentence, what the situation is and what to do next ("Autopilot needs your
+decision. Restart the model server? A approves, R rejects, E shows the evidence."). Under that, the
+footer lists only the keys that work right now, with small dots at the right for what protects you
+(`• watchdog  • audit`). At the right of the stream on a wide terminal is the **workload panel**: the
+model, probe latency, GPU and VRAM, and whether Autopilot is watching (`W` shows or hides it).
+Notices are toasts above the bar; an error waits for a key.
 
-Deciding an incident: open it (`Enter`). The page reads *What happened*, *What we found*,
-*Recommended action* and *Recovery check*; `A` (approve) or `R` (reject) work only on that page, and
-only once the incident's details have loaded (until then it says "Loading the full details…"). The
-request that opens explains itself: the problem, the server's reason, the evidence, the proposed
-action, and that the action is allowlisted and runs only after you approve; a restart interrupts
-inference and has no rollback. It is two steps on purpose: `A` or `R` opens it, `Enter` confirms
-exactly that action (ignored for the first half second so a held key cannot confirm it), `Esc`
-cancels. While the server executes and verifies, an inline banner shows the server's current state.
-If the problem has already gone by the time you confirm, the server refuses, nothing is restarted,
-and a dialog says "RECOVERY NO LONGER NEEDED".
+The header names the space you are in and which world you are in: `LIVE · GPU-REAL` (a real GPU
+reading is present), `LIVE`, or `SIMULATION`. Five spaces (`←`/`→`, `Tab`, or `1`–`5`):
 
-Inside the TUI: `Ctrl+P` opens the command palette; `?` opens Help. Five areas in a strip under the
-header (`←`/`→`, `Tab`, or `1`–`5`):
-
-| Area | What it is for |
+| Space | What it is for |
 |---|---|
-| **1 Home** | What is running, is it healthy, is Autopilot watching, and what you can do next |
+| **1 Overview** | A sentence on what is going on and the loop at rest, explaining each stage; when something needs you, the stream takes over |
 | **2 Incidents** | What happened, why, what Autopilot proposes, and what needs your OK |
-| **3 Lab** | Experience and verify the loop: a safe recovery test, or (when offered) a real fault |
+| **3 Lab** | Test the autopilot: a list of tests you move through and run (a safe recovery test, and, when offered, pausing the real workload); a running test is a live stream |
 | **4 Activity** | What the system did and decided, in order |
 | **5 System** | The control plane and its stop, the same checks as `aiops doctor`, the validated active configuration, and About; all read-only except the confirmed stop |
 
-The same seven-stage loop is drawn on Home, the incident page and the Lab, one glyph and one word
-per stage (`✓` done, `→` here now, `✗` failed, `○` not run, `–` not applicable):
-`Observe › Detect › Diagnose › Propose › Approve › Recover › Verify`. It is derived from the incident
-status the server reports; a stage is never shown as done before the server says it happened.
+**Keys.** `Ctrl+P` opens the command palette (a *Suggested* group for the moment you are in, then
+Test, Go to, View and System; the shortcut at the right of each row), `?` Help, `D` the technical view
+of the same screen (exact categories, raw states, evidence sources, GPU and vLLM metrics, audit
+hashes; `aiops-tui --once --details` prints that frame for scripts), `E` the evidence under every
+stage, `I` Incidents, `R` run a recovery test, `F` open the real-fault dialog (Overview and Lab only),
+`A` Activity. Where an incident's stream is on screen and it is waiting for you, `A` and `R` are its
+decision keys instead, and the footer says so.
 
-A few keys mean something different on the incident page than elsewhere, because only the incident
-page can decide: there `A` approves and `R` rejects; elsewhere `R` runs a recovery test, `A` opens
-Activity, `F` opens the real-fault dialog (Home and Lab only) and `I` opens Incidents. The footer
-always lists only the keys that work on the screen you are on. Restarting the control plane is not
-done from the TUI; run `aiops` again after a stop.
+**Deciding.** Open the incident (`Enter`) or stay on Overview, where it is already the page. The
+decision keys work only once the incident's full details have loaded (until then the stream says
+"Loading the full details…"). The request that opens explains itself: the problem, the server's
+reason, the evidence, the proposed action, and that the action is allowlisted and runs only after you
+approve; a restart interrupts inference and has no rollback. It is two steps on purpose: `A` or `R`
+opens it, `Enter` confirms exactly that action (ignored for the first half second so a held key cannot
+confirm it), `Esc` cancels. While the server works the bar says so. If the problem has already gone
+by the time you confirm, the server refuses, nothing is restarted, and a dialog says "RECOVERY NO
+LONGER NEEDED".
+
+**Looks.** On a truecolor terminal the default is a cool tonal palette: four surfaces (page, panel,
+element, raised), one teal accent for "the loop is here", amber only for "this needs you", green and
+coral for state. Every text colour is tested at 4.5:1 or better on every surface it sits on (body
+text 7:1). `--theme light` is its light twin, `--theme terminal` (the default when `COLORTERM` does not
+say truecolor) uses your terminal's own colours with no surfaces, and `NO_COLOR` (or `--theme mono`)
+removes colour entirely: structure survives as bars, glyphs and weight, and state is always a glyph
+plus a word. `--no-animation` (or `AIOPS_NO_ANIMATION=1`) makes the spinner a still `⋯`.
+
+Restarting the control plane is not done from the TUI; run `aiops` again after a stop.
 
 The explicit commands remain for scripts and debugging:
 
@@ -170,21 +182,22 @@ The explicit commands remain for scripts and debugging:
 
 ## Try the failure loop safely (SIMULATION)
 
-In the TUI: press **`R`** on Home (or open the **Lab**, `3`, or `Ctrl+P` then "Run a recovery test").
-One key runs the whole test: a fresh simulated session starts, and as soon as the server reports the
-simulated model healthy the TUI asks it to break the model. A persistent amber banner,
-`RECOVERY TEST · SIMULATION`, appears on every screen, and the header badge says `SIMULATION`.
+In the TUI: open the **Lab** (`3`), pick *Model becomes unresponsive* and press `Enter` (or press
+**`R`** on the Overview, or `Ctrl+P` then "Run a recovery test"). One key runs the whole test: a
+fresh simulated session starts, and as soon as the server reports the simulated model healthy the TUI
+asks it to break the model. A persistent amber banner, `RECOVERY TEST · SIMULATION`, appears on every
+space, the header badge says `SIMULATION`, and the workload panel says its values are simulated.
 
-The Lab then tells the story as the server reports it, step by step, with the server's own
-timestamps: *Test started*, *Fault injected*, *Detected* (the detector needs the problem on
-consecutive checks), *Diagnosis*, *Recovery proposed* (with the evidence and why it needs your OK),
-*You approved*, *Recovered*, *Verified* (with the recorded checks) and *INCIDENT RESOLVED*. Press
-`Enter` to review and decide on the incident page, then `Esc` to come back to the finished story.
-`R` runs it again; `Esc` in the Lab (or on Home) leaves the test and returns to the real system.
-The request says "A simulated restart: nothing real is restarted." The real system, its incidents,
-its watchdog and its workload are never touched, and nothing from the test is ever shown as real (or
-the reverse): the test has its own routes (`/api/v1/practice/...`), its own engine, store and lock,
-and the TUI discards any poll that belongs to the other one.
+The Lab then becomes the live stream of the test, built only from what the server reports, with the
+server's own timestamps: `TEST STARTED`, `FAULT INJECTED`, `DETECTED` (the detector needs the problem
+on consecutive checks), `DIAGNOSED`, `RECOVERY READY` (with the evidence and why it needs your OK),
+`APPROVED`, `RECOVERED`, `VERIFIED` (with the recorded checks) and `✓ INCIDENT RESOLVED`. The decision
+is made right there: `A` opens the request, `Enter` confirms. `R` runs it again; `Esc` leaves the
+test and returns to the real system. The request says "A simulated restart: nothing real is
+restarted." The real system, its incidents, its watchdog and its workload are never touched, and
+nothing from the test is ever shown as real (or the reverse): the test has its own routes
+(`/api/v1/practice/...`), its own engine, store and lock, and the TUI discards any poll that belongs
+to the other one.
 
 From the command line, without the TUI:
 
@@ -217,7 +230,7 @@ This is the project's official end-to-end demonstration on real hardware. It use
 vLLM and your real approval; nothing is simulated. It needs the setup above (`aiops doctor` clean
 and the labelled vLLM container running and healthy).
 
-1. In one terminal run `aiops` and stay on Home (everything healthy).
+1. In one terminal run `aiops` and stay on the Overview (everything healthy).
 2. In another terminal pause the workload (a bounded, reversible fault):
 
         docker pause aiops-vllm          # use your container's name
@@ -260,7 +273,7 @@ workload for a bounded time. It is a testing tool, never part of normal operatio
 do one thing.
 
 In the TUI: the **Lab** (`3`) lists it under *Real infrastructure* ("affects the running workload"),
-and `F` on Home or the Lab (or `Ctrl+P`, then **"Inject a real fault (pause the workload)…"**) opens
+and `F` on the Overview or the Lab (or `Ctrl+P`, then **"Inject a real fault (pause the workload)…"**) opens
 a dialog. `F` works only on those two screens, so a stray key elsewhere does nothing, and it only
 opens the dialog: nothing is sent until you press `Enter` (ignored for the first half second).
 The dialog says what will happen (`LIVE · GPU-REAL`: the managed workload stops answering for up to

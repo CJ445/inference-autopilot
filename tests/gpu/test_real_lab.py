@@ -37,12 +37,12 @@ def test_a_real_fault_from_the_lab_and_an_approval_that_is_refused_because_the_p
         t = Term(tui_bin, f"http://127.0.0.1:{c.port}", rows=44, cols=130)
         try:
             assert t.wait_screen("✓ HEALTHY", timeout=60)
-            assert t.wait_screen("[F] Inject a real fault")             # offered on Home, from the server
+            assert t.wait_screen("F Inject fault")                      # offered in the footer, from the server
 
             # -- the Lab lists the real fault, labelled, and F opens a dialog that sends nothing ----------
             t.send(b"3")
-            assert t.wait_screen("Real infrastructure") and t.wait_screen("affects the running workload")
-            assert t.wait_screen("[F] Pause the running workload")
+            assert t.wait_screen("REAL INFRASTRUCTURE") and t.wait_screen("affects the running workload")
+            assert t.wait_screen("Pause the running workload")
             t.send(b"f")
             assert t.wait_screen("REAL INFRASTRUCTURE FAULT") and t.wait_screen("LIVE · GPU-REAL")
             assert t.wait_screen("[Enter] Inject fault")
@@ -61,8 +61,8 @@ def test_a_real_fault_from_the_lab_and_an_approval_that_is_refused_because_the_p
             assert t.wait_screen("REAL FAULT IN PROGRESS") and t.wait_screen("it resumes by itself in")
 
             # -- the real detector opens a real incident; the Lab tells the story from the server ----------
-            assert t.wait_screen("Needs your OK", timeout=120)
-            for needle in ["Detected", "Diagnosis", "Recovery proposed", "Restart the model server"]:
+            assert t.wait_screen("RECOVERY READY", timeout=120)
+            for needle in ["✓ DETECTED", "✓ DIAGNOSED", "Restart the model server"]:
                 assert t.wait_screen(needle), needle
             iid = http(c.port, "/api/v1/incidents")["incidents"][0]["incident_id"]
             assert http(c.port, f"/api/v1/incidents/{iid}")["status"] == "POLICY_CHECK"
@@ -79,7 +79,7 @@ def test_a_real_fault_from_the_lab_and_an_approval_that_is_refused_because_the_p
                      90, "the model to answer again")
 
             # -- approving now is refused by the server, and the TUI says nothing was restarted -------------
-            t.send(b"\r")                                                # Enter in the Lab: the incident
+            t.send(b"1")                                                 # the Overview: the waiting incident is the page
             assert t.wait_screen("[ A ] Approve", timeout=30)
             t.send(b"a")
             assert t.wait_screen("RECOVERY REQUEST")

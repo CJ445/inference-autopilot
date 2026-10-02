@@ -157,7 +157,7 @@ pub(super) fn bar_for(app: &App) -> Bar {
                 let left = (fault.expires_at - app.wall).max(0.0) as u64;
                 bar(Tone::Waiting, "Real fault in progress", format!("The workload is paused; it resumes by itself in {}:{:02}. Autopilot is waiting to detect it.", left / 60, left % 60))
             }
-            None if no_workload(app) => bar(Tone::Info, "Nothing to watch yet", "Autopilot will not start a workload for you. Start one and it is picked up."),
+            None if no_workload(app) => bar(Tone::Info, "Nothing to watch yet", "Autopilot will not start one. Start it and it is picked up."),
             None => bar(Tone::Info, "Autopilot is watching", "Run a recovery test to watch it detect, diagnose and recover."),
         },
         Some(i) => incident_bar(app, i),

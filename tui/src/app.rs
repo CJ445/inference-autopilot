@@ -17,7 +17,7 @@ pub const TELEMETRY_STALE_SECS: f64 = 10.0;
 pub const REFUSED_STALE: &str = "no longer present";
 
 /// A success notice fades after this long. An error stays until the operator presses a key.
-pub const NOTICE_TTL: Duration = Duration::from_secs(10);
+pub const NOTICE_TTL: Duration = Duration::from_secs(4);
 
 /// Statuses the server treats as finished (display grouping only; the server decides).
 const CLOSED: [&str; 5] = ["RESOLVED", "UNRESOLVED", "EXECUTION_FAILED", "REJECTED", "CLEARED"];
@@ -127,25 +127,25 @@ impl Command {
     pub const ALL: [Command; 16] = [
         Command::Practice,
         Command::BreakWorkload,
-        Command::Incidents,
-        Command::Audit,
-        Command::Lab,
+        Command::ExitPractice,
+        Command::ResumeWorkload,
         Command::Overview,
+        Command::Incidents,
+        Command::Lab,
+        Command::Audit,
         Command::System,
         Command::Evidence,
         Command::Panel,
         Command::ToggleDetails,
-        Command::StopControlPlane,
-        Command::ExitPractice,
-        Command::ResumeWorkload,
-        Command::Help,
         Command::Refresh,
+        Command::StopControlPlane,
+        Command::Help,
         Command::Quit,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
-            Command::Overview => "Go to Home",
+            Command::Overview => "Go to Overview",
             Command::Incidents => "View incidents",
             Command::Lab => "Open the Lab",
             Command::Audit => "View activity",
@@ -779,9 +779,11 @@ impl App {
         let online = matches!(self.conn, Conn::Online);
         Offer {
             practicing: self.practice,
+            // a real fault is for a calm system: never while an incident is open
             can_break: online
                 && !self.practice
-                && faults.map_or(false, |f| f.available && f.active.is_none()),
+                && faults.map_or(false, |f| f.available && f.active.is_none())
+                && !self.rows().iter().any(|i| !is_closed(&i.status)),
             can_resume: online && !self.practice && faults.map_or(false, |f| f.active.is_some()),
             awaiting: self.snapshot.as_ref().is_some_and(|s| s.incidents.iter().any(|i| i.status == "POLICY_CHECK")),
         }

@@ -42,7 +42,7 @@ def test_bare_aiops_starts_attaches_and_stops_the_real_control_plane(vllm, tmp_p
         try:
             assert t.wait_screen("● online", timeout=120)
             assert t.wait_screen("✓ HEALTHY", timeout=60)               # plain by default
-            assert t.wait_screen("✓ WATCHING")
+            assert t.wait_screen("✓ watching")
             t.send(b"d")                                                # then the technical view
             for needle in ["INFERENCE AUTOPILOT", "docker-real-gpu", uuid[:12], "Probe ✓",
                            "Metrics ✓", "● ARMED", "Identity ✓", "AUDIT ✓ VERIFIED",

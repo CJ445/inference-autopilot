@@ -786,3 +786,38 @@ fn the_labs_menu_is_not_about_any_incident_so_r_there_never_rejects_one() {
     assert!(a.handle_key(key('a')).is_empty() && a.confirm.is_none(), "and A never approves from the menu");
     assert_eq!(a.screen, Screen::Audit);
 }
+
+#[test]
+fn a_real_fault_is_for_a_calm_system_never_offered_while_an_incident_is_open() {
+    let mut calm = real_with_faults(serde_json::json!({"available": true, "active": null}));
+    assert!(calm.offer().can_break);
+    // an incident in flight (waiting, recovering or verifying): not the moment to break something else
+    for status in ["POLICY_CHECK", "EXECUTING", "VERIFYING"] {
+        let mut v: serde_json::Value = serde_json::from_str(HEALTHY).unwrap();
+        v["faults"] = serde_json::json!({"available": true, "active": null});
+        let mut a = App::new("http://127.0.0.1:8080".into());
+        a.apply(Msg::Poll(Ok(Snapshot::new(serde_json::from_value(v).unwrap(), vec![with_status(incident(PENDING), status)]))));
+        assert!(!a.offer().can_break, "{status}");
+        a.handle_key(key('f'));
+        assert!(!a.fault_confirm, "{status}: F must not open the dialog");
+        assert!(!ui::render_to_string(&a, 140, 40).lines().last().unwrap().contains("Inject fault"));
+    }
+    // a finished incident does not block it
+    let mut v: serde_json::Value = serde_json::from_str(HEALTHY).unwrap();
+    v["faults"] = serde_json::json!({"available": true, "active": null});
+    calm.apply(Msg::Poll(Ok(Snapshot::new(serde_json::from_value(v).unwrap(), vec![incident(RESOLVED)]))));
+    assert!(calm.offer().can_break);
+}
+
+#[test]
+fn the_go_to_group_lists_the_spaces_in_the_order_you_reach_them() {
+    use aiops_tui::app::{Command, Palette};
+    let mut p = Palette::default();
+    p.query = "go to".into();
+    assert_eq!(p.matches(Default::default()), vec![Command::Overview]);
+    let all = Palette::default().matches(Default::default());
+    let spaces: Vec<Command> = all.into_iter().filter(|c| c.category() == "Go to" || *c == Command::Incidents).collect();
+    let order: Vec<Command> = spaces.iter().copied().filter(|c| *c != Command::Incidents).collect();
+    assert_eq!(order, vec![Command::Overview, Command::Lab, Command::Audit, Command::System], "Incidents is suggested first");
+    assert_eq!(Command::Overview.label(), "Go to Overview");
+}

@@ -269,7 +269,7 @@ fn ctrl_p_opens_the_palette_and_esc_closes_it() {
     a.handle_key(ctrl('p'));
     assert!(a.palette.is_some());
     let s = screen(&a);
-    for needle in ["Commands", "Search commands", "Go to Home", "View incidents", "View activity",
+    for needle in ["Commands", "Search commands", "Go to Overview", "View incidents", "View activity",
                    "Show system status", "Help", "Refresh", "Stop control plane", "Quit"] {
         has(&s, needle);
     }

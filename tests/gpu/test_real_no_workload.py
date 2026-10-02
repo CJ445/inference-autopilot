@@ -44,7 +44,7 @@ def test_aiops_opens_with_no_workload_and_follows_it_as_the_operator_starts_and_
         try:
             # -- zero workloads: the control plane starts and the TUI opens ----------------------
             assert t.wait_screen("● online", timeout=120)
-            assert t.wait_screen("NO WORKLOAD CONNECTED")             # the plain default: a valid, calm state
+            assert t.wait_screen("No workload connected.")             # the plain default: a valid, calm state
             assert t.wait_screen("Autopilot will not create or start one automatically.")
             t.send(b"d")                                              # the technical view for the rest
             assert t.wait_screen("○ NO WORKLOAD") and t.wait_screen("No workload running")

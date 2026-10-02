@@ -40,8 +40,8 @@ def test_practice_on_the_real_machine_touches_nothing_real(tmp_path, tui_bin):
     with ControlPlane(tmp_path) as c:
         t = Pty([AIOPS, "--config", str(c.cfg)], env_for(tui_bin), rows=40, cols=132)
         try:
-            assert t.wait_screen("NO WORKLOAD CONNECTED", timeout=120)  # the real, empty system
-            assert t.wait_screen("[R] Run a recovery test")
+            assert t.wait_screen("No workload connected.", timeout=120)  # the real, empty system
+            assert t.wait_screen("R Run test")
             t.send(b"d")                                               # the technical view for the rest
             assert t.wait_screen("○ NO WORKLOAD") and t.wait_screen("Press R to run a recovery test")
             real = http(c.port, "/api/v1/status")
@@ -49,16 +49,14 @@ def test_practice_on_the_real_machine_touches_nothing_real(tmp_path, tui_bin):
             pid = lifecycle.read_state(c.state)["pid"]
 
             t.send(b"r")                                                # -- one key: the recovery test -
-            assert t.wait_screen("RECOVERY TEST · SIMULATION") and t.wait_screen("Test started")
+            assert t.wait_screen("RECOVERY TEST · SIMULATION") and t.wait_screen("TEST STARTED")
             assert "NO WORKLOAD" not in t.vs.text()                     # no real data under the banner
-            assert t.wait_screen("Needs your OK", timeout=30)           # the fault followed by itself
-            t.send(b"\r")
-            assert t.wait_screen("Classification")
-            t.send(b"a")
+            assert t.wait_screen("[ A ] Approve", timeout=30)           # the fault followed by itself
+            t.send(b"a")                                                # the request opens in the stream
             assert t.wait_screen("A simulated restart: nothing real is restarted.")
             time.sleep(0.8)
             t.send(b"\r")
-            assert t.wait_screen("RESOLVED", timeout=30)
+            assert t.wait_screen("INCIDENT RESOLVED", timeout=30)
 
             # nothing real moved while the simulation ran its whole loop
             assert containers() == before                               # no container created

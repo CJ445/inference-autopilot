@@ -357,3 +357,28 @@ dedicated error code would be cleaner but is an API change, and this phase does 
 **Honest limits.** Ratatui has no alpha blending: the backdrop is approximated by blending each cell toward black (truecolor) or by the DIM attribute (ANSI). It cannot query the terminal's background colour, so the tonal theme paints its own; the ANSI theme stays terminal-native and loses the tonal surfaces, keeping the left bar, the spacing and the glyphs. The spinner is driven by the event loop's 100 ms tick. Verification progress ("completion 1 / 3") is not reported by the server while it runs, so it is not shown: only the recorded checks, when they exist.
 
 **Contrast (computed, not eyeballed).** Every text token is tested against every surface it sits on (≥ 4.5:1; small muted text ≥ 4.5:1 on the raised tone; the bar and glyph colours ≥ 3:1). OpenCode's own muted grey fails this on its raised surfaces (4.2:1 and 3.7:1), so it is not copied.
+
+**Update (implementation notes).**
+* Deviations from the first plan, from rendering the real frames: the loop at rest is the spine itself
+  (each stage saying what it will do) rather than a row of glyphs, which taught nothing; the anchored bar
+  is one tone lighter than the panels so it does not merge with the workload panel; toasts sit just
+  above the bar and not at the top right, where they covered what they were about; the workload panel
+  is shown only on Overview, the Lab and an incident's page (the list spaces get the width).
+* Quit is no longer in the footer (it lists only what works here, and is the least needed); it is in the
+  palette, in Help, and on `Ctrl+C`.
+* Decisions work wherever the incident's stream is on screen (Overview, the incident page, the Lab's
+  running test or fault) and only once its details have loaded: they are still two steps. The Lab's
+  *menu* is not about any incident, so `R` there runs a test even when a real incident is waiting;
+  conversely `R` on the Overview while a real incident is waiting means reject, and the footer says
+  so. A footer that offered "Run test" there would have lied.
+* The footer's key table is now one list with priorities: the way into the palette and Help, and the
+  status dots, outlive the nice-to-have keys (a test caught Help being dropped at 72 columns, and a
+  mis-sized column count that hid the dots at 76).
+* Contrast is a test, not a promise: every text token on every surface in Dark and Light (a green was
+  4.2:1 on the raised surface and was darkened); the light theme cannot leak a dark token; the tonal
+  theme paints every cell so it never depends on the terminal's background.
+* The backdrop is dimmed after the theme is applied (it blends RGB in the tonal themes and marks DIM
+  in the terminal's own colours); a test covers both and the kept rectangle.
+* Not done: the bar shows no per-completion verification progress ("completion 1 of 3") because the
+  server does not report it while it verifies; the recorded checks appear when they exist. No animation
+  other than the spinner.
